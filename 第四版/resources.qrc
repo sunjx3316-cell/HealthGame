@@ -1,0 +1,15 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>assets/textures/disease_heart.png</file>
+        <file>assets/textures/disease_liver.png</file>
+        <file>assets/textures/disease_lungs.png</file>
+        <file>assets/textures/disease_skin.png</file>
+        <file>assets/textures/disease_stomach.png</file>
+        <file>assets/textures/healthy_heart.png</file>
+        <file>assets/textures/healthy_liver.png</file>
+        <file>assets/textures/healthy_lungs.png</file>
+        <file>assets/textures/healthy_skin.png</file>
+        <file>assets/textures/healthy_stomach.png</file>
+    </qresource>
+</RCC>
