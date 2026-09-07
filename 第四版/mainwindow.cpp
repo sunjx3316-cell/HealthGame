@@ -1,798 +1,544 @@
 #include "mainwindow.h"
-#include "GameEngine.h"
-#include "Database.h"
-#include "ResourceManager.h"
 #include "StartupDialog.h"
+#include "Database.h"
+#include "DiseaseVisual.h"
+#include "AnatomyLab.h"
+#include "SaveRepository.h"
+#include <QApplication>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
-#include <QGroupBox>
-#include <QMessageBox>
+#include <QFrame>
+#include <QSplitter>
 #include <QScrollArea>
-#include <QScrollBar>
+#include <QMessageBox>
 #include <QInputDialog>
-#include <QPixmap>
-#include <QPropertyAnimation>
-#include <QGraphicsOpacityEffect>
-#include <QEvent>
-#include <QApplication>
-#include <QPainter>
-#include <QTabWidget>
+#include <QFile>
+#include <QFileInfo>
+#include <QCloseEvent>
+#include <QTime>
+#include <QSignalBlocker>
+#include <QTextDocument>
+#include <QStatusBar>
 
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), currentViewedOrgan("")
-{
-    // 提前初始化数据库，确保后续 UI 构建能读取到药品
-    Database::getInstance().init();
-    ResourceManager::getInstance().init();
-
-    engine = new GameEngine(this);
-
-    // 连接引擎信号
-    connect(engine, &GameEngine::healthChanged, this, [this](double h){ healthBar->setValue((int)h); });
-    connect(engine, &GameEngine::immunityChanged, this, [this](double im){ immuneBar->setValue((int)im); });
-    connect(engine, &GameEngine::ageChanged, this, [this](int a){ 
-        ageLabel->setText(QString("年龄：%1 岁").arg(a));
-        ageStageLabel->setText(getAgeStageText(a));
-    });
-    connect(engine, &GameEngine::moneyChanged, this, [this](int m){
-        moneyLabel->setText(QString("金币：%1").arg(m));
-    });
-    connect(engine, &GameEngine::researchChanged, this, [this](int res){
-        researchLabel->setText(QString("科研点数：%1").arg(res));
-    });
-    connect(engine, &GameEngine::vitalsChanged, this, [this](double sys, double dia, double sugar, double lipids){
-        // 为各个指标单独判断颜色，新增过低标红逻辑
-        QString bpColor = (sys > 140 || dia > 90 || sys < 90 || dia < 60) ? "red" : "black";
-        QString sugarColor = (sugar > 7.0 || sugar < 3.9) ? "red" : "black";
-        QString lipidsColor = (lipids > 2.0 || lipids < 0.5) ? "red" : "black";
-        
-        // 使用富文本 (HTML) 分别对不同部分进行着色
-        vitalsLabel->setText(QString("血压: <font color='%1'>%2/%3</font> | "
-                                     "血糖: <font color='%4'>%5</font> | "
-                                     "血脂: <font color='%6'>%7</font>")
-                             .arg(bpColor).arg(sys, 0, 'f', 0).arg(dia, 0, 'f', 0)
-                             .arg(sugarColor).arg(sugar, 0, 'f', 1)
-                             .arg(lipidsColor).arg(lipids, 0, 'f', 1));
-    });
-    connect(engine, &GameEngine::organStateChanged, this, &MainWindow::updateOrganButtonState);
-    connect(engine, &GameEngine::gameOver, this, &MainWindow::showGameOver);
-    connect(engine, &GameEngine::gameMessage, this, &MainWindow::appendLogMessage);
-    connect(engine, &GameEngine::diseaseTriggered, this, [this](){
-        // 触发病变时，时间流速降至 0.01 倍 (子弹时间)，让疾病的扣血机制有更充足的操作时间
-        timeSlider->setValue(0); 
-        updateTimerInterval();
-        flashScreen();
-    });
-
-    // 绝症与长寿事件处理
-    connect(engine, &GameEngine::checkupEvent, this, [this](int age) {
-        timeSlider->setValue(0); 
-        updateTimerInterval();
-        int ret = QMessageBox::question(this, "例行体检", 
-            QString("你今年 %1 岁了。按规定可以进行每3年一次的全身深度体检，费用 30,000 金币。\n体检可以及早发现隐藏的恶性疾病，避免其恶化为晚期。\n是否花费 30,000 金币进行体检？（当前金币：%2）").arg(age).arg(engine->getMoney()),
-            QMessageBox::Yes | QMessageBox::No);
-        
-        if (ret == QMessageBox::Yes) {
-            engine->performCheckup();
-        } else {
-            engine->gameMessage("【系统】你拒绝了今年的全身深度体检。如果有隐藏的重疾，它可能会在未来突然爆发！");
-        }
-        
-        timeSlider->setValue(20); 
-        updateTimerInterval();
-    });
-    connect(engine, &GameEngine::level6DiseaseEvent, this, [this](bool success, const QString& diseaseName) {
-        timeSlider->setValue(0); 
-        updateTimerInterval();
-        if (success) {
-            bool ok;
-            QString techName = QInputDialog::getText(this, "科研奇迹！", 
-                QString("80岁大限将至，你患上了绝症【%1】！\n但凭借强大的科研能力，你成功研发了攻克该绝症的技术！\n请为你的技术命名：").arg(diseaseName),
-                QLineEdit::Normal, "基因修复疗法", &ok);
-            if (!ok || techName.isEmpty()) techName = "未知靶向药";
-            
-            // 【新增】将研发成功的消息写入系统日志
-            QString playerName = engine->getPlayerName();
-            if (playerName.isEmpty()) playerName = "你";
-            appendLogMessage(QString("【世界医学史突破】%1 成功研发出 [%2]，一举解决了攻克 [%3] 的世纪难题！").arg(playerName).arg(techName).arg(diseaseName));
-            
-            // 80岁攻克绝症不仅需要技术，还需要花费 100万 制造/使用该药
-            int ret = QMessageBox::question(this, "使用特效药", 
-                QString("技术虽然突破了，但制造并使用这副【%1】需要花费 100万 金币！\n是否支付并延长 10 年寿命（上限至90岁）？\n（当前金币：%2）").arg(techName).arg(engine->getMoney()),
-                QMessageBox::Yes | QMessageBox::No);
-                
-            if (ret == QMessageBox::Yes && engine->payForLifeExtension(1000000, 10)) {
-                QMessageBox::information(this, "劫后余生", QString("你发明的【%1】成功治愈了绝症！\n你的寿命上限延长至 90 岁！").arg(techName));
-                // 恢复时间流速
-                timeSlider->setValue(20); 
-                updateTimerInterval();
-            } else {
-                showGameOver(QString("【讣告】\n%1 在 %2 岁时突发绝症【%3】。\n虽然研发出了特效药，但因囊中羞涩无法承担百万巨额治疗费，遗憾离世。")
-                    .arg(engine->getPlayerName()).arg(engine->getAge()).arg(diseaseName));
-            }
-        } else {
-            showGameOver(QString("【讣告】\n%1 在 %2 岁时突发绝症【%3】。\n由于科研能力不足，未能突破技术瓶颈，遗憾离世。")
-                .arg(engine->getPlayerName()).arg(engine->getAge()).arg(diseaseName));
-        }
-    });
-
-    connect(engine, &GameEngine::lifeExtensionEvent, this, [this](bool success) {
-        timeSlider->setValue(0); 
-        updateTimerInterval();
-        if (success) {
-            bool ok;
-            QString techName = QInputDialog::getText(this, "长寿突破！", 
-                "100岁大限已到！\n你成功研发了长寿技术！\n请为该技术命名：",
-                QLineEdit::Normal, "端粒延长术", &ok);
-            if (!ok || techName.isEmpty()) techName = "神秘长寿术";
-            
-            engine->setLifeExtensionTechName(techName);
-            
-            QString playerName = engine->getPlayerName();
-            if (playerName.isEmpty()) playerName = "你";
-            appendLogMessage(QString("【惊世发明】%1 成功研发出长寿技术 [%2]，彻底突破了人类百岁极限！").arg(playerName).arg(techName));
-            
-            int ret = QMessageBox::question(this, "使用长寿技术", 
-                QString("是否花费 100万 金币使用【%1】延长 10 年寿命？\n（当前金币：%2）").arg(techName).arg(engine->getMoney()),
-                QMessageBox::Yes | QMessageBox::No);
-            
-            if (ret == QMessageBox::Yes && engine->payForLifeExtension()) {
-                QMessageBox::information(this, "重获新生", "寿命成功延长 10 年！");
-                timeSlider->setValue(20); 
-                updateTimerInterval();
-            } else {
-                showGameOver(QString("【讣告】\n%1 在 %2 岁时大限已到。\n虽然掌握了长寿技术，但因资金不足或放弃使用，安详离世。")
-                    .arg(engine->getPlayerName()).arg(engine->getAge()));
-            }
-        } else {
-            showGameOver(QString("【讣告】\n%1 在 %2 岁时身体机能彻底衰竭。\n科研未能突破寿命极限，安详离世。")
-                .arg(engine->getPlayerName()).arg(engine->getAge()));
-        }
-    });
-
-    connect(engine, &GameEngine::requireLifeExtensionPayment, this, [this](const QString& techName) {
-        timeSlider->setValue(0); 
-        updateTimerInterval();
-        int ret = QMessageBox::question(this, "大限将至", 
-            QString("寿命极限再次到来，是否花费 100万 金币使用【%1】延长 10 年寿命？\n（当前金币：%2）").arg(techName).arg(engine->getMoney()),
-            QMessageBox::Yes | QMessageBox::No);
-        
-        if (ret == QMessageBox::Yes && engine->payForLifeExtension()) {
-            QMessageBox::information(this, "重获新生", "寿命成功延长 10 年！");
-            timeSlider->setValue(20); 
-            updateTimerInterval();
-        } else {
-            showGameOver(QString("【讣告】\n%1 在 %2 岁时大限已到。\n放弃延续生命，安详离世。")
-                .arg(engine->getPlayerName()).arg(engine->getAge()));
-        }
-    });
-
-    connect(engine, &GameEngine::organDetailUpdated, this, [this](const QString& organName) {
-        if (currentViewedOrgan == organName) {
-            showOrganDetail(organName);
-        }
-    });
-
-    flashOverlay = new QWidget(this);
-    flashOverlay->setStyleSheet("background-color: rgba(255, 0, 0, 100);");
-    flashOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
-    flashOverlay->hide();
-
+namespace {
+QLabel* label(const QString& text,const QString& name,QWidget* parent=nullptr){
+    auto* l=new QLabel(text,parent);l->setObjectName(name);return l;
+}
+QFrame* card(const QString& name){auto* f=new QFrame;f->setObjectName(name);return f;}
+QString stageName(int stage){return stage==1?"早期":stage==2?"中期":stage==3?"晚期":"";}
+const QStringList organOrder{"心脏","肺部","肝脏","胃部","皮肤"};
+QString severityColor(int n){return QStringList{"#9dccc0","#88c99b","#c2cb7c","#e4b078","#e18f84","#ca9ac4"}.value(n,"#a6c1bb");}
+QStringList diagnosedComorbidities(const OrganState& organ){
+    QStringList result;
+    for(const auto& other:organ.coexisting)
+        if(other.isDiseased)result.append(other.currentDisease.name);
+    return result;
+}
+// Nested dialogs pause the engine and restore the caller's prior state.
+struct PauseScope {
+    GameEngine* engine;
+    QElapsedTimer& elapsed;
+    bool before;
+    PauseScope(GameEngine* e,QElapsedTimer& t):engine(e),elapsed(t),before(e->isPaused()){engine->setPaused(true);}
+    ~PauseScope(){engine->setPaused(before);elapsed.restart();}
+};
+}
+MainWindow::MainWindow(QWidget* parent,bool useDialogs,const QString& saveDirectory):QMainWindow(parent),interactive(useDialogs),saveRoot(saveDirectory){
+    engine=new GameEngine(this);engine->setObjectName("gameEngine");
     setupUi();
-    // 启动游戏并请求玩家姓名
-    engine->initGame();
-    
-    QTimer::singleShot(100, this, [this]() {
-        StartupDialog dialog(this);
-        if (dialog.exec() == QDialog::Accepted) {
-            engine->setPlayerAttributes(dialog.getPlayerName(), dialog.getWealth(), dialog.getLuck(), dialog.getConstitution(), dialog.getResearch());
-        } else {
-            engine->setPlayerAttributes("无名氏", 0, 0, 0, 0); // 默认值
-        }
-        
-        // 开始游戏循环
-        gameTimer = new QTimer(this);
-        connect(gameTimer, &QTimer::timeout, engine, &GameEngine::tick);
-        updateTimerInterval(); // 根据 Slider 启动 timer
-    
-        // 真实时间计时器，用于在子弹时间 (0.01x) 期间持续扣血
-        realTimeTimer = new QTimer(this);
-        connect(realTimeTimer, &QTimer::timeout, this, [this](){
-            if (timeSlider->value() == 0) {
-                engine->applyRealTimePenalty();
-            }
+    connect(engine,&GameEngine::stateChanged,this,&MainWindow::refresh);
+    connect(engine,&GameEngine::stateChanged,this,[this]{
+        // Loading, initialization and mere navigation must never overwrite a saved life.
+        if(interactive&&hasCurrentSession&&!suppressSaveTracking){saveDirty=true;autosaveArmed=true;}
+    });
+    connect(engine,&GameEngine::gameMessage,this,&MainWindow::log);
+    connect(engine,&GameEngine::diseaseTriggered,this,[this]{speed->setValue(1);},Qt::QueuedConnection);
+    connect(engine,&GameEngine::checkupEvent,this,[this](int age){
+        log(QString("例行体检提醒：%1 岁，可以用右侧「全身体检」发现隐性疾病。").arg(age));
+    },Qt::QueuedConnection);
+    connect(engine,&GameEngine::level6DiseaseEvent,this,[this](bool,const QString&){handleMilestone(80);},Qt::QueuedConnection);
+    connect(engine,&GameEngine::lifeExtensionEvent,this,[this](bool){handleMilestone(100);},Qt::QueuedConnection);
+    connect(engine,&GameEngine::requireLifeExtensionPayment,this,[this](const QString&){handleMilestone(90);},Qt::QueuedConnection);
+    connect(engine,&GameEngine::gameOver,this,&MainWindow::showGameOver,Qt::QueuedConnection);
+    connect(&timer,&QTimer::timeout,this,[this]{
+        double seconds=elapsed.restart()/1000.0;
+        engine->advanceTime(seconds);
+    });
+    elapsed.start();timer.start(50);refresh();setPaused(true);
+    connect(&autosaveTimer,&QTimer::timeout,this,[this]{writeAutosave();});
+    if(interactive){
+        autosaveTimer.start(10000);
+        QTimer::singleShot(0,this,[this]{
+            if(saveEntries().isEmpty())newGame();
+            else showSaveManager(true);
         });
-        realTimeTimer->start(1000); // 每秒触发一次
-    });
+    }
 }
+void MainWindow::setupUi(){
+    setWindowTitle("器官保卫战 · Anatomy 3D");
+    resize(1480,960);setMinimumSize(1140,760);
+    qApp->setFont(QFont("Microsoft YaHei UI",10));
+    setStyleSheet(R"(
+        QMainWindow,QDialog { background:#101c23; color:#dde7e2; }
+        QWidget { color:#d9e4df; font-family:"Microsoft YaHei UI"; font-size:12px; }
+        QFrame#card,QFrame#sidebar,QFrame#inspector,QFrame#pharmacy {background:#17272e;border:1px solid #2a3c42;border-radius:10px;}
+        QLabel#eyebrow{color:#79b7ae;font-size:10px;letter-spacing:2px;}
+        QLabel#heading{font-size:23px;font-weight:600;color:#eef3e9;}
+        QLabel#section{font-size:15px;font-weight:600;color:#e4ece4;}
+        QLabel#muted{color:#8ca6a7;}
+        QLabel#largeValue{font-size:20px;font-weight:600;color:#e2eddf;}
+        QPushButton{background:#22363c;border:1px solid #354b50;border-radius:6px;padding:8px 12px;color:#cbded9;}
+        QPushButton:hover{background:#2c464b;border-color:#73b9ae;}
+        QPushButton:pressed{background:#34564f;}
+        QPushButton:checked{background:#2b4f4b;border:1px solid #7bb7a6;color:#daf2e3;}
+        QPushButton:disabled{color:#667c7e;border-color:#27383d;background:#1a2a30;}
+        QPushButton#primary{background:#bbd0b4;color:#142b29;font-weight:600;border:0;}
+        QPushButton#primary:hover{background:#d5e6c9;}
+        QPushButton#organCard{text-align:left;padding:13px;font-size:13px;border-radius:8px;}
+        QProgressBar{border:0;border-radius:3px;background:#2b3c40;height:8px;text-align:center;font-size:10px;}
+        QProgressBar::chunk{border-radius:3px;background:#9bbc98;}
+        QProgressBar#immune::chunk{background:#7dacae;}
+        QLineEdit,QSpinBox,QComboBox{background:#102129;border:1px solid #344b50;padding:7px;border-radius:5px;color:#dce7e1;}
+        QSpinBox::up-button,QSpinBox::down-button{width:18px;background:#30464b;}
+        QComboBox QAbstractItemView{background:#182e35;color:#e1ebe3;selection-background-color:#386257;}
+        QTextBrowser{background:transparent;border:0;color:#bfd0ca;}
+        QListWidget{background:#112129;border:1px solid #293d43;border-radius:5px;outline:0;}
+        QListWidget::item{padding:8px 11px;border-bottom:1px solid #24363d;}
+        QListWidget::item:selected{background:#294e47;color:#e3f1dd;}
+        QListWidget::item:hover{background:#233b40;}
+        QScrollBar:vertical{background:#16272d;width:7px;border:0;}
+        QScrollBar::handle:vertical{background:#45615f;border-radius:3px;min-height:20px;}
+        QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}
+        QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:none;}
+        QSlider::groove:horizontal{height:4px;background:#304449;border-radius:2px;}
+        QSlider::handle:horizontal{width:12px;margin:-5px 0;background:#b8d4b9;border-radius:6px;}
+        QToolTip{background:#24413f;color:#e9efdf;border:1px solid #5a8178;padding:6px;}
+        QStatusBar{background:#101c23;color:#799795;font-size:10px;}
+        QMessageBox{background:#17272e;}
+    )");
+    auto* central=new QWidget;setCentralWidget(central);
+    auto* root=new QVBoxLayout(central);root->setContentsMargins(20,16,20,8);root->setSpacing(12);
+    auto* header=new QHBoxLayout;
+    auto* brand=new QVBoxLayout;brand->addWidget(label("HEALTHGAME / 生命观察站","eyebrow"));
+    brand->addWidget(label("器官保卫战","heading"));header->addLayout(brand);header->addSpacing(28);
+    auto* identity=new QVBoxLayout;ageLabel=label("0 岁 · 婴儿期","largeValue");
+    identity->addWidget(ageLabel);moneyLabel=label("金币 10,000","muted");identity->addWidget(moneyLabel);header->addLayout(identity);header->addSpacing(20);
+    auto* vitals=new QVBoxLayout;vitalsLabel=label("","");vitalsLabel->setTextFormat(Qt::RichText);vitals->addWidget(vitalsLabel);
+    auto* bars=new QHBoxLayout;healthBar=new QProgressBar;immuneBar=new QProgressBar;immuneBar->setObjectName("immune");
+    healthBar->setFormat("生命 %p%");immuneBar->setFormat("免疫 %p%");healthBar->setRange(0,100);immuneBar->setRange(0,100);
+    bars->addWidget(healthBar);bars->addWidget(immuneBar);vitals->addLayout(bars);header->addLayout(vitals,1);
+    auto* timeBox=new QVBoxLayout;speedLabel=label("时间 2.0×","muted");timeBox->addWidget(speedLabel);
+    speed=new QSlider(Qt::Horizontal);speed->setObjectName("timeSpeed");speed->setRange(1,40);speed->setValue(20);speed->setMaximumWidth(150);
+    connect(speed,&QSlider::valueChanged,this,[this](int v){engine->setTimeMultiplier(v/10.0);speedLabel->setText(QString("时间 %1× · 10 Tick / 年").arg(v/10.0,0,'f',1));});
+    timeBox->addWidget(speed);header->addLayout(timeBox);
+    pauseButton=new QPushButton("暂停");pauseButton->setObjectName("pauseButton");
+    connect(pauseButton,&QPushButton::clicked,this,[this]{setPaused(!manualPause);});header->addWidget(pauseButton);
+    auto* save=new QPushButton("快速存档");auto* load=new QPushButton("存档管理");auto* restart=new QPushButton("新人生");
+    save->setObjectName("saveButton");load->setObjectName("loadButton");restart->setObjectName("newGameButton");
+    connect(save,&QPushButton::clicked,this,&MainWindow::saveGame);connect(load,&QPushButton::clicked,this,&MainWindow::loadGame);
+    connect(restart,&QPushButton::clicked,this,&MainWindow::newGame);
+    header->addWidget(save);header->addWidget(load);header->addWidget(restart);root->addLayout(header);
 
-MainWindow::~MainWindow() {}
+    auto* center=new QHBoxLayout;center->setSpacing(12);
+    auto* sidebar=card("sidebar");sidebar->setMinimumWidth(172);
+    auto* nav=new QVBoxLayout(sidebar);nav->setContentsMargins(14,18,14,14);nav->setSpacing(10);
+    nav->setSizeConstraint(QLayout::SetMinimumSize);
+    nav->addWidget(label("ORGAN SYSTEM","eyebrow"));nav->addWidget(label("器官导航","section"));nav->addSpacing(6);
+    bodyButton=new QPushButton("◎  全身概览");bodyButton->setObjectName("bodyButton");bodyButton->setCheckable(true);
+    connect(bodyButton,&QPushButton::clicked,this,[this]{selectOrgan("");});nav->addWidget(bodyButton);
+    const QStringList en{"HEART","LUNGS","LIVER","STOMACH","SKIN"};
+    for(int i=0;i<organOrder.size();++i){
+        auto* btn=new QPushButton(organOrder[i]+"\n"+en[i]);btn->setObjectName("organCard");btn->setProperty("organ",organOrder[i]);
+        btn->setCheckable(true);btn->setMinimumHeight(61);organButtons[organOrder[i]]=btn;
+        connect(btn,&QPushButton::clicked,this,[this,i]{selectOrgan(organOrder[i]);});nav->addWidget(btn);
+    }
+    nav->addStretch();
+    auto* atlasButton=new QPushButton("年龄 / 疾病图谱");atlasButton->setObjectName("atlasButton");
+    connect(atlasButton,&QPushButton::clicked,this,[this]{PauseScope pause(engine,elapsed);AnatomyLab lab(engine->getAge(),this);lab.exec();});
+    nav->addWidget(atlasButton);
+    auto* hint=label("观察身体的每一次变化\n点击模型或器官卡片进入","muted");hint->setWordWrap(true);nav->addWidget(hint);
+    auto* note=label("病灶为游戏可视化示意","muted");note->setStyleSheet("font-size:10px;color:#658783;");nav->addWidget(note);
+    auto* navigationScroll=new QScrollArea;navigationScroll->setObjectName("organNavigationScroll");
+    navigationScroll->setWidgetResizable(true);navigationScroll->setFrameShape(QFrame::NoFrame);
+    navigationScroll->setStyleSheet("QScrollArea#organNavigationScroll{background:#101c23;border:0;}");
+    navigationScroll->viewport()->setAutoFillBackground(false);
+    navigationScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    navigationScroll->setFixedWidth(186);navigationScroll->setWidget(sidebar);center->addWidget(navigationScroll);
 
-void MainWindow::setupUi()
-{
-    this->resize(1200, 800);
-    this->setWindowTitle("医疗科普模拟系统 - 深度体验版");
+    auto* canvas=new QVBoxLayout;canvas->setSpacing(8);
+    auto* toolbar=new QHBoxLayout;
+    titleLabel=label("全身概览","section");toolbar->addWidget(titleLabel);toolbar->addStretch();
+    skinButton=new QPushButton("人体透视");skinButton->setCheckable(true);skinButton->setChecked(true);
+    cutButton=new QPushButton("内部剖视");cutButton->setCheckable(true);cutButton->setObjectName("cutawayButton");
+    auto* rotate=new QPushButton("自动旋转");rotate->setCheckable(true);
+    auto* reset=new QPushButton("视角复位");
+    toolbar->addWidget(skinButton);toolbar->addWidget(cutButton);toolbar->addWidget(rotate);toolbar->addWidget(reset);
+    canvas->addLayout(toolbar);
+    anatomy=new AnatomyView;
+    connect(anatomy,&AnatomyView::organSelected,this,&MainWindow::selectOrgan);
+    connect(skinButton,&QPushButton::toggled,anatomy,&AnatomyView::setSkinVisible);
+    connect(cutButton,&QPushButton::toggled,anatomy,&AnatomyView::setCutaway);
+    connect(rotate,&QPushButton::toggled,anatomy,&AnatomyView::setAutoRotate);
+    connect(reset,&QPushButton::clicked,anatomy,&AnatomyView::resetCamera);
+    canvas->addWidget(anatomy,1);center->addLayout(canvas,1);
 
-    QWidget *centralWidget = new QWidget(this);
-    this->setCentralWidget(centralWidget);
-    QVBoxLayout *mainLayout = new QVBoxLayout(centralWidget);
+    auto* inspector=card("inspector");inspector->setFixedWidth(274);
+    auto* info=new QVBoxLayout(inspector);info->setContentsMargins(17,18,17,16);info->setSpacing(10);
+    info->addWidget(label("CLINICAL OBSERVATION","eyebrow"));
+    organStatus=label("生命档案","section");info->addWidget(organStatus);
+    diseaseLabel=label("未见明显异常","");diseaseLabel->setWordWrap(true);info->addWidget(diseaseLabel);
+    details=new QTextBrowser;details->setObjectName("organDetails");details->setOpenExternalLinks(false);info->addWidget(details,1);
+    checkupLabel=label("","muted");checkupLabel->setWordWrap(true);info->addWidget(checkupLabel);
+    checkupButton=new QPushButton("全身体检");checkupButton->setObjectName("checkupButton");
+    connect(checkupButton,&QPushButton::clicked,this,&MainWindow::runCheckup);info->addWidget(checkupButton);
+    researchLabel=label("科研 0 / 17","section");info->addWidget(researchLabel);
+    researchInfo=label("","muted");researchInfo->setWordWrap(true);info->addWidget(researchInfo);
+    researchButton=new QPushButton("科研训练");researchButton->setObjectName("researchButton");
+    connect(researchButton,&QPushButton::clicked,this,[this]{
+        if(engine->buyResearchPoint())log("科研提升 1 点：收入增加，体检与续命成本降低；下一次训练需间隔 3 年。");
+    });info->addWidget(researchButton);center->addWidget(inspector);
+    root->addLayout(center,1);
 
-    // ============================================
-    // 1. 顶部：状态栏 (含免疫系统与时间流速控制)
-    // ============================================
-    QHBoxLayout *topLayout = new QHBoxLayout();
-    
-    ageLabel = new QLabel("年龄：0 岁", this);
-    ageLabel->setFont(QFont("Arial", 14, QFont::Bold));
-    ageStageLabel = new QLabel("婴儿期", this);
-    ageStageLabel->setFont(QFont("Arial", 12, QFont::Bold));
-    ageStageLabel->setStyleSheet("color: #1976D2;");
-    
-    // 新增：金币与体征显示
-    QVBoxLayout *statsLayout = new QVBoxLayout();
-    moneyLabel = new QLabel("金币：0", this);
-    moneyLabel->setFont(QFont("Arial", 12, QFont::Bold));
-    moneyLabel->setStyleSheet("color: #FF9800;");
-    
-    // 新增科研点数显示与购买
-    QHBoxLayout *researchLayout = new QHBoxLayout();
-    researchLabel = new QLabel(QString("科研点数：%1").arg(engine->getResearch()), this);
-    researchLabel->setFont(QFont("Arial", 12, QFont::Bold));
-    researchLabel->setStyleSheet("color: #9C27B0;");
-    buyResearchBtn = new QPushButton("提升科研 (50万)", this);
-    buyResearchBtn->setStyleSheet("background-color: #E1BEE7; border-radius: 3px; padding: 2px;");
-    connect(buyResearchBtn, &QPushButton::clicked, this, [this](){
-        if(engine->buyResearchPoint()) {
-            QMessageBox::information(this, "科研突破", "成功花费 50万金币，科研点数 +1！\n你的研究能力增强了。");
-        } else {
-            if (engine->getResearch() >= 17) {
-                QMessageBox::warning(this, "科研满级", "你的科研点数已经达到满级 (17)，无法继续提升！");
-            } else {
-                QMessageBox::warning(this, "资金不足", "购买科研点数需要 50万 金币！");
+    auto* bottom=new QHBoxLayout;bottom->setSpacing(12);
+    auto* pharmacy=card("pharmacy");auto* pharmacyLayout=new QVBoxLayout(pharmacy);pharmacyLayout->setContentsMargins(14,12,14,12);
+    auto* filter=new QHBoxLayout;filter->addWidget(label("治疗中心","section"));
+    category=new QComboBox;category->addItems({"推荐治疗","全部","药剂","手术","保健品"});category->setMinimumWidth(105);filter->addWidget(category);
+    search=new QLineEdit;search->setObjectName("medicineSearch");search->setPlaceholderText("搜索药品、疾病名称或编号");search->setClearButtonEnabled(true);filter->addWidget(search,1);
+    pharmacyLayout->addLayout(filter);
+    auto* treatment=new QHBoxLayout;medicines=new QListWidget;medicines->setObjectName("medicineList");medicines->setMinimumWidth(310);
+    treatment->addWidget(medicines,3);
+    auto* selectedMed=new QVBoxLayout;medicineInfo=label("选择一种治疗方式","");medicineInfo->setWordWrap(true);selectedMed->addWidget(medicineInfo,1);
+    auto* action=new QHBoxLayout;dosage=new QSpinBox;dosage->setRange(1,10);dosage->setPrefix("数量 ");dosage->setMaximumWidth(100);
+    treatButton=new QPushButton("进行治疗");treatButton->setObjectName("primary");treatButton->setMinimumWidth(130);
+    action->addWidget(dosage);action->addWidget(treatButton,1);selectedMed->addLayout(action);treatment->addLayout(selectedMed,4);pharmacyLayout->addLayout(treatment,1);
+    pharmacy->setFixedHeight(212);bottom->addWidget(pharmacy,3);
+    auto* logs=card("card");auto* logLayout=new QVBoxLayout(logs);logLayout->setContentsMargins(14,12,14,10);
+    logLayout->addWidget(label("生命记录","section"));journal=new QTextBrowser;journal->setObjectName("journal");journal->document()->setMaximumBlockCount(300);
+    logLayout->addWidget(journal);logs->setFixedHeight(212);bottom->addWidget(logs,1);root->addLayout(bottom);
+    connect(search,&QLineEdit::textChanged,this,&MainWindow::refreshMedicines);
+    connect(category,&QComboBox::currentIndexChanged,this,&MainWindow::refreshMedicines);
+    connect(medicines,&QListWidget::currentRowChanged,this,&MainWindow::refreshMedicineDetail);
+    connect(dosage,&QSpinBox::valueChanged,this,&MainWindow::refreshMedicineDetail);
+    connect(treatButton,&QPushButton::clicked,this,&MainWindow::treat);
+    statusBar()->showMessage("三维器官实时观察  /  有进展时每 10 秒自动保存  /  Ctrl+S 独立手动存档，空格暂停");
+    auto* saveAction=new QAction(this);saveAction->setShortcut(QKeySequence::Save);addAction(saveAction);connect(saveAction,&QAction::triggered,this,&MainWindow::saveGame);
+    auto* pauseAction=new QAction(this);pauseAction->setShortcut(Qt::Key_Space);addAction(pauseAction);connect(pauseAction,&QAction::triggered,this,[this]{setPaused(!manualPause);});
+}
+void MainWindow::setPaused(bool value){
+    if(!value&&interactive&&!hasCurrentSession)value=true;
+    manualPause=value;engine->setPaused(value);pauseButton->setText(value?"继续":"暂停");elapsed.restart();
+}
+void MainWindow::selectOrgan(const QString& name){
+    selected=name;anatomy->setOrgan(name);
+    QSignalBlocker blocker(cutButton);cutButton->setChecked(false);anatomy->setCutaway(false);
+    refresh();
+}
+void MainWindow::refresh(){
+    if(refreshing)return;
+    refreshing=true;
+    const int age=engine->getAge();
+    QString stage=age<=5?"婴儿期":age<=12?"儿童期":age<=18?"青年期":age<=60?"成年期":"老年期";
+    ageLabel->setText(QString("%1 岁 · %2").arg(age).arg(stage));
+    moneyLabel->setText(QString("金币 %1").arg(QLocale().toString(engine->getMoney())));
+    healthBar->setValue(int(engine->getHealth()));immuneBar->setValue(int(engine->getImmunity()));
+    auto val=[](double n,bool bad,int dec){return QString("<span style='color:%1'>%2</span>").arg(bad?"#ee9c86":"#cadbd0").arg(n,0,'f',dec);};
+    vitalsLabel->setText(QString("血压 %1/%2　 血糖 %3　 血脂 %4")
+        .arg(val(engine->getSystolic(),engine->getSystolic()>140||engine->getSystolic()<90,0),
+             val(engine->getDiastolic(),engine->getDiastolic()>90||engine->getDiastolic()<60,0),
+             val(engine->getBloodSugar(),engine->getBloodSugar()>7||engine->getBloodSugar()<3.9,1),
+             val(engine->getBloodLipids(),engine->getBloodLipids()>2||engine->getBloodLipids()<0.5,1)));
+    const auto states=engine->getOrgans();anatomy->setAge(age);anatomy->setStates(states);
+    bodyButton->setChecked(selected.isEmpty());
+    int count=0;
+    for(const auto& name:organOrder){
+        const auto o=states.value(name);auto* btn=organButtons[name];btn->setChecked(name==selected);
+        const auto coexisting=diagnosedComorbidities(o);
+        QString status=o.isDiseased?QString("%1级 · %2").arg(o.currentDisease.severity).arg(stageName(o.diseaseStage)):"未见明显异常";
+        if(!coexisting.isEmpty())status+=QString(" · 合并 %1 病").arg(coexisting.size());
+        if(o.isDiseased||!coexisting.isEmpty())++count;
+        btn->setText(name+"\n"+status);
+        btn->setStyleSheet(QString("color:%1;").arg(severityColor(o.isDiseased?o.currentDisease.severity:0)));
+    }
+    titleLabel->setText(selected.isEmpty()?"全身概览":selected+" · 组织观察");
+    cutButton->setEnabled(!selected.isEmpty());skinButton->setEnabled(selected.isEmpty());
+    if(selected.isEmpty()){
+        organStatus->setText("生命档案");
+        diseaseLabel->setText(count?QString("%1 个器官存在已确诊病变").arg(count):"未见明显异常");
+        QString html="<p style='color:#97bdb2'>观察 · 发现 · 干预</p><p>旋转人体观察器官位置，点击器官进入详细的三维解剖视图。</p>"
+            "<p>内部剖视可查看血管、气道和组织层。病灶表现随疾病、病期和治疗进度变化。</p>"
+            "<p>隐性疾病在体检或症状出现前不显示。合并疾病会同时影响身体，治疗中心优先处理当前主病。</p>";
+        html+=QString("<p>当前寿命上限：<b>%1 岁</b><br>目标：110 岁</p>").arg(engine->getMaxAge());
+        details->setHtml(html);
+    }else{
+        const auto o=states.value(selected);organStatus->setText(selected+"观察");
+        if(o.isDiseased){
+            auto visual=DiseaseVisuals::forState(o);diseaseLabel->setText(o.currentDisease.name);
+            diseaseLabel->setStyleSheet("color:"+severityColor(o.currentDisease.severity)+";font-size:16px;font-weight:600;");
+            QString html=QString("<p><b>%1 级%2</b></p><p>%3</p><p style='color:#91bdb3'>可视变化</p><p>%4</p>")
+                .arg(o.currentDisease.severity).arg(o.diseaseStage?" · "+stageName(o.diseaseStage):"")
+                .arg(o.currentDisease.symptoms.toHtmlEscaped(),visual.description.toHtmlEscaped());
+            if(!o.currentDisease.treatmentStages.isEmpty()){
+                html+=QString("<p style='color:#91bdb3'>治疗进度 %1 / %2</p>").arg(o.currentTreatmentStage).arg(o.currentDisease.treatmentStages.size());
+                for(int i=0;i<o.currentDisease.treatmentStages.size();++i){
+                    QString med=Database::getInstance().getMedicineById(o.currentDisease.treatmentStages[i]).name.toHtmlEscaped();
+                    html+=QString("<p style='color:%1'>%2 %3</p>").arg(i<o.currentTreatmentStage?"#688f84":i==o.currentTreatmentStage?"#ecd2a4":"#9badab")
+                        .arg(i<o.currentTreatmentStage?"✓":QString::number(i+1)+".").arg(med);
+                }
+            }else html+="<p>在下方「推荐治疗」中选择对症药物。</p>";
+            if(o.autoHealTimer>0)html+=QString("<p>预计自愈：剩余 %1 个 Tick</p>").arg(o.autoHealTimer);
+            const auto coexisting=diagnosedComorbidities(o);
+            if(!coexisting.isEmpty()){
+                html+="<p style='color:#ecd2a4'>已确诊合并病</p>";
+                for(const auto& name:coexisting)html+="<p>• "+name.toHtmlEscaped()+"</p>";
+                html+="<p>当前优先治疗主病；主病治愈后自动切换至下一病情。合并病仍需关注。</p>";
             }
-        }
-    });
-    researchLayout->addWidget(researchLabel);
-    researchLayout->addWidget(buyResearchBtn);
-    researchLayout->addStretch();
-    
-    vitalsLabel = new QLabel("血压: 120/80 | 血糖: 5.0 | 血脂: 1.5", this);
-    vitalsLabel->setFont(QFont("Arial", 10));
-    statsLayout->addWidget(moneyLabel);
-    statsLayout->addLayout(researchLayout);
-    statsLayout->addWidget(vitalsLabel);
-    
-    QVBoxLayout *barsLayout = new QVBoxLayout();
-    healthBar = new QProgressBar(this);
-    healthBar->setRange(0, 100);
-    healthBar->setValue(100);
-    healthBar->setFormat("生命值：%p / 100");
-    healthBar->setStyleSheet("QProgressBar::chunk { background-color: #4CAF50; }");
-    
-    immuneBar = new QProgressBar(this);
-    immuneBar->setRange(0, 100);
-    immuneBar->setValue(50);
-    immuneBar->setFormat("免疫力：%p / 100");
-    immuneBar->setStyleSheet("QProgressBar::chunk { background-color: #2196F3; }");
-    barsLayout->addWidget(healthBar);
-    barsLayout->addWidget(immuneBar);
-
-    // 时间控制区
-    QVBoxLayout *timeLayout = new QVBoxLayout();
-    timeSpeedLabel = new QLabel("流速: 2.0x", this);
-    timeSlider = new QSlider(Qt::Horizontal, this);
-    timeSlider->setRange(0, 40); // 允许从 0 (完全暂停) 到 4.0x (极快)
-    timeSlider->setValue(20); // 默认 2.0x
-    connect(timeSlider, &QSlider::valueChanged, this, &MainWindow::updateTimerInterval);
-    timeLayout->addWidget(timeSpeedLabel);
-    timeLayout->addWidget(timeSlider);
-
-    QPushButton* saveBtn = new QPushButton("保存", this);
-    QPushButton* loadBtn = new QPushButton("读取", this);
-    connect(saveBtn, &QPushButton::clicked, this, &MainWindow::saveGame);
-    connect(loadBtn, &QPushButton::clicked, this, &MainWindow::loadGame);
-
-    topLayout->addWidget(ageLabel);
-    topLayout->addWidget(ageStageLabel);
-    topLayout->addLayout(statsLayout); // 插入金币与体征布局
-    topLayout->addLayout(barsLayout, 2);
-    topLayout->addLayout(timeLayout, 1);
-    topLayout->addWidget(saveBtn);
-    topLayout->addWidget(loadBtn);
-    
-    mainLayout->addLayout(topLayout);
-
-    // ============================================
-    // 2. 中间：多页面切换
-    // ============================================
-    stackedWidget = new QStackedWidget(this);
-    mainLayout->addWidget(stackedWidget, 3); 
-
-    // --- 页面1：主界面 ---
-    bodyPage = new QWidget();
-    QVBoxLayout *bodyLayout = new QVBoxLayout(bodyPage);
-    
-    // 自定义一个可点击的 QLabel（通过事件过滤器实现）或者直接用按钮做背景
-    bodyBackgroundLabel = new QLabel(bodyPage);
-    bodyBackgroundLabel->setAlignment(Qt::AlignCenter);
-    bodyBackgroundLabel->setMinimumHeight(400);
-    bodyBackgroundLabel->setStyleSheet("border: 2px solid #ccc; background-color: #f5f5f5;");
-    bodyBackgroundLabel->setCursor(Qt::PointingHandCursor);
-    bodyBackgroundLabel->setToolTip("点击查看皮肤详情");
-    
-    // 初始化皮肤为健康状态
-    QPixmap skinPixmap = ResourceManager::getInstance().getTexture("healthy_skin.png");
-    bodyBackgroundLabel->setPixmap(skinPixmap.scaled(600, 600, Qt::KeepAspectRatio));
-
-    // 为了支持绝对定位和点击事件，我们将 bodyBackgroundLabel 设置为事件过滤器
-    bodyBackgroundLabel->installEventFilter(this);
-
-    // 新增：疾病等级颜色图例 (Legend)
-    QWidget *legendWidget = new QWidget(bodyPage);
-    QHBoxLayout *legendLayout = new QHBoxLayout(legendWidget);
-    legendLayout->setContentsMargins(5, 5, 5, 5);
-    legendLayout->setSpacing(10);
-    
-    auto createLegendItem = [](const QString& text, const QString& colorStr) -> QWidget* {
-        QWidget *w = new QWidget();
-        QHBoxLayout *l = new QHBoxLayout(w);
-        l->setContentsMargins(0, 0, 0, 0);
-        QLabel *colorBox = new QLabel();
-        colorBox->setFixedSize(16, 16);
-        colorBox->setStyleSheet(QString("background-color: %1; border: 1px solid #999;").arg(colorStr));
-        QLabel *label = new QLabel(text);
-        label->setFont(QFont("Arial", 10, QFont::Bold));
-        l->addWidget(colorBox);
-        l->addWidget(label);
-        return w;
-    };
-    
-    legendLayout->addWidget(new QLabel("<b>疾病严重程度：</b>"));
-    legendLayout->addWidget(createLegendItem("1级(轻微)", "#4CAF50")); // 绿色
-    legendLayout->addWidget(createLegendItem("2级(普通)", "#CDDC39")); // 较深的黄绿色 (Lime)
-    legendLayout->addWidget(createLegendItem("3级(中度)", "#FF9800")); // 橙色
-    legendLayout->addWidget(createLegendItem("4级(严重)", "#F44336")); // 红色
-    legendLayout->addWidget(createLegendItem("5级(致命)", "#9C27B0")); // 紫色
-    legendLayout->addStretch();
-    legendWidget->setStyleSheet("background-color: rgba(255, 255, 255, 220); border-radius: 5px;");
-    
-    bodyLayout->addWidget(legendWidget, 0, Qt::AlignTop);
-    bodyLayout->addWidget(bodyBackgroundLabel, 1);
-
-    QStringList organNames = {"心脏", "肺部", "胃部", "肝脏"};
-    for(const QString& name : organNames) {
-        // 按钮父组件设为 bodyBackgroundLabel，使其悬浮在背景上
-        QPushButton *btn = new QPushButton(name, bodyBackgroundLabel);
-        btn->setFixedSize(80, 80);
-        btn->setStyleSheet("background-color: rgba(224, 224, 224, 200); font-size: 14px; font-weight: bold; border-radius: 40px;");
-        organButtons[name] = btn;
-        connect(btn, &QPushButton::clicked, this, [this, name](){ showOrganDetail(name); });
-    }
-
-    stackedWidget->addWidget(bodyPage);
-
-    // --- 页面2：详情视图 ---
-    detailPage = new QWidget();
-    QVBoxLayout *detailLayout = new QVBoxLayout(detailPage);
-    
-    QHBoxLayout *detailTopLayout = new QHBoxLayout();
-    returnBtn = new QPushButton("← 返回人体视图", detailPage);
-    diseaseNameLabel = new QLabel("健康", detailPage);
-    diseaseNameLabel->setFont(QFont("Arial", 18, QFont::Bold));
-    diseaseNameLabel->setAlignment(Qt::AlignCenter);
-    
-    // 诊疗指南按钮
-    guideBtn = new QPushButton("💡 查看诊疗指南", detailPage);
-    guideBtn->setStyleSheet("background-color: #FFC107; font-weight: bold; border-radius: 5px; padding: 5px;");
-    guideBtn->hide(); // 默认隐藏，生病时才显示
-    connect(guideBtn, &QPushButton::clicked, this, &MainWindow::showTreatmentGuide);
-
-    detailTopLayout->addWidget(returnBtn);
-    detailTopLayout->addWidget(diseaseNameLabel, 1);
-    detailTopLayout->addWidget(guideBtn);
-    
-    organDetailImageLabel = new QLabel("器官高清图 (从本地 assets/textures 加载)", detailPage);
-    organDetailImageLabel->setAlignment(Qt::AlignCenter);
-    organDetailImageLabel->setMinimumHeight(300);
-    organDetailImageLabel->setStyleSheet("background-color: #E3F2FD; font-size: 16px; border: 2px solid #90CAF9;");
-    
-    symptomTextEdit = new QTextEdit(detailPage);
-    symptomTextEdit->setReadOnly(true);
-    symptomTextEdit->setFont(QFont("Arial", 12));
-    
-    detailLayout->addLayout(detailTopLayout);
-    detailLayout->addWidget(organDetailImageLabel, 2);
-    detailLayout->addWidget(symptomTextEdit, 1);
-    stackedWidget->addWidget(detailPage);
-
-    // ============================================
-    // 3. 底部：日志与药箱
-    // ============================================
-    bottomWidget = new QWidget(this);
-    QHBoxLayout *bottomLayout = new QHBoxLayout(bottomWidget);
-
-    QGroupBox *logGroup = new QGroupBox("系统日志", this);
-    QVBoxLayout *logGroupLayout = new QVBoxLayout(logGroup);
-    logTextEdit = new QTextEdit(this);
-    logTextEdit->setReadOnly(true);
-    logGroupLayout->addWidget(logTextEdit);
-    bottomLayout->addWidget(logGroup, 1);
-
-    QGroupBox *medicineBoxGroup = new QGroupBox("医疗药箱", this);
-    QVBoxLayout *medMainLayout = new QVBoxLayout(medicineBoxGroup); // 改用 VBox，上方搜索，下方网格
-
-    // 搜索框
-    medicineSearchBar = new QLineEdit(medicineBoxGroup);
-    medicineSearchBar->setPlaceholderText("🔍 输入药品名称或适应症拼音进行快速搜索...");
-    medicineSearchBar->setClearButtonEnabled(true);
-    connect(medicineSearchBar, &QLineEdit::textChanged, this, &MainWindow::filterMedicines);
-    medMainLayout->addWidget(medicineSearchBar);
-
-    QTabWidget *medicineTabWidget = new QTabWidget(medicineBoxGroup);
-    medicineTabWidget->setStyleSheet("QTabBar::tab { height: 30px; font-weight: bold; }");
-    
-    QVector<Medicine> allMeds = Database::getInstance().getAllMedicines();
-    
-    auto createTab = [&](const QString& title, const QString& typeFilter) {
-        QScrollArea *scrollArea = new QScrollArea(this);
-        QWidget *scrollWidget = new QWidget(scrollArea);
-        QGridLayout *scrollLayout = new QGridLayout(scrollWidget);
-        
-        int row = 0, col = 0;
-        for(const Medicine& med : allMeds) {
-            if (med.type != typeFilter) continue;
-            
-            // 显示药品名称、类型和价格
-            QString btnText = QString("%1\n¥%2").arg(med.name).arg(med.price);
-            QPushButton *btn = new QPushButton(btnText, scrollWidget);
-            QString tooltip = QString("适应症: %1\n安全剂量: %2\n副作用扣血: %3\n冲突药品数量: %4\n类型: %5\n价格: %6")
-                                .arg(med.indication).arg(med.safeDosage).arg(med.sideEffectData.hpPenalty).arg(med.incompatibleMeds.size()).arg(med.type).arg(med.price);
-            btn->setToolTip(tooltip);
-            btn->setMinimumHeight(50);
-            btn->setProperty("medId", med.id);
-            btn->setProperty("indication", med.indication); // 存入适应症，方便搜索
-            connect(btn, &QPushButton::clicked, this, &MainWindow::useMedicine);
-            
-            medicineButtons[med.id] = btn;
-            scrollLayout->addWidget(btn, row, col);
-            
-            col++;
-            if(col > 3) { col = 0; row++; }
-        }
-        
-        // 添加一个弹簧填充底部空间，避免按钮高度被拉伸
-        scrollLayout->setRowStretch(row + 1, 1);
-        
-        scrollWidget->setLayout(scrollLayout);
-        scrollArea->setWidget(scrollWidget);
-        scrollArea->setWidgetResizable(true);
-        medicineTabWidget->addTab(scrollArea, title);
-    };
-
-    createTab("💊 药剂", "药剂");
-    createTab("🔪 手术", "手术");
-    createTab("🌿 保健品", "保健品");
-    
-    medMainLayout->addWidget(medicineTabWidget);
-    bottomLayout->addWidget(medicineBoxGroup, 2);
-    mainLayout->addWidget(bottomWidget, 1);
-
-    connect(returnBtn, &QPushButton::clicked, this, &MainWindow::returnToBodyView);
-}
-
-void MainWindow::updateTimerInterval() {
-    double mult = timeSlider->value() / 10.0;
-    
-    // 如果滑块拉到 0，我们将其视为 0.01x (治病时的极慢速/子弹时间)
-    if (timeSlider->value() == 0) {
-        mult = 0.01;
-    }
-    
-    timeSpeedLabel->setText(QString("流速: %1x").arg(mult, 0, 'f', 2));
-    engine->setTimeMultiplier(mult);
-    
-    int baseInterval = 1000;
-    int newInterval = static_cast<int>(baseInterval / mult);
-    
-    gameTimer->start(newInterval);
-}
-
-QString MainWindow::getAgeStageText(int age) {
-    if (age <= 5) return "婴儿期";
-    if (age <= 12) return "儿童期";
-    if (age <= 18) return "青年期"; // 新增：13-18岁为青年期
-    if (age <= 60) return "成年期";
-    return "老年期";
-}
-
-bool MainWindow::areAllOrgansHealthy() {
-    QMap<QString, OrganState> organs = engine->getOrgans();
-    for (const auto& organName : organs.keys()) {
-        if (organs[organName].isDiseased) {
-            return false;
+            details->setHtml(html);
+        }else{
+            diseaseLabel->setText("未发现可见病变");diseaseLabel->setStyleSheet("color:#a6c9aa;font-size:15px;");
+            QMap<QString,QString> desc{
+                {"心脏","观察心室、心房、主动脉弓、冠状血管。打开剖视可见心腔、瓣膜与腱索。"},
+                {"肺部","观察左右肺轮廓、肺叶分界、气管软骨环。打开剖视可见分支气道。"},
+                {"肝脏","观察肝叶、胆囊及胆管。打开剖视可见组织内分支血管。"},
+                {"胃部","观察胃、食管、十二指肠及相邻结构。打开剖视可见胃黏膜皱襞与胰腺。"},
+                {"皮肤","观察立体皮肤组织样本。剖视可见表皮、真皮、皮下脂肪、血管及毛囊。"}};
+            QString html="<p>"+desc.value(selected)+"</p><p>拖动模型可以从不同方向观察，滚轮调整远近。</p><p>外观正常不代表没有隐性疾病；定期体检可以发现早期病变。</p>";
+            const auto coexisting=diagnosedComorbidities(o);
+            if(!coexisting.isEmpty()){
+                diseaseLabel->setText("存在已确诊合并病");
+                html+="<p style='color:#ecd2a4'>已确诊合并病</p>";
+                for(const auto& name:coexisting)html+="<p>• "+name.toHtmlEscaped()+"</p>";
+            }
+            details->setHtml(html);
         }
     }
+    const int checkupInterval=engine->getCheckupInterval(),checkupCost=engine->getCheckupCost();
+    int remaining=std::max(0,checkupInterval-(age-engine->getLastCheckupAge()));
+    checkupLabel->setText(remaining?QString("下次体检：%1 岁（还需 %2 年）").arg(age+remaining).arg(remaining):QString("当前可以体检 · 每 %1 年一次").arg(checkupInterval));
+    checkupButton->setText(QString("全身体检 · %1").arg(QLocale().toString(checkupCost)));
+    checkupButton->setEnabled(!engine->isFinished()&&!engine->hasPendingMilestone()&&remaining==0&&engine->getMoney()>=checkupCost);
+    researchLabel->setText(QString("科研 %1 / 17").arg(engine->getResearch()));
+    researchInfo->setText(QString("当前年收入 %1 金币\n每次续命 %2 金币 · 支付后成功\n18 岁起训练，每 3 年一次，最多 +5 点")
+        .arg(QLocale().toString(age<18?1000:engine->getAnnualIncome()),QLocale().toString(engine->getLifeExtensionCost())));
+    researchButton->setText(QString("科研训练 · %1").arg(QLocale().toString(engine->getResearchPointCost())));
+    researchButton->setToolTip("18 岁起开放，需满足资金、3 年训练间隔、每局最多提升 5 点及科研总上限 17 的条件。");
+    researchButton->setEnabled(!engine->isFinished()&&!engine->hasPendingMilestone()&&engine->canBuyResearchPoint()&&engine->getMoney()>=engine->getResearchPointCost());
+    pauseButton->setEnabled((!interactive||hasCurrentSession)&&!engine->isFinished()&&!engine->hasPendingMilestone());
+    refreshMedicines();refreshing=false;
+}
+void MainWindow::refreshMedicines(){
+    const QString previous=medicines->currentItem()?medicines->currentItem()->data(Qt::UserRole).toString():"";
+    const auto state=engine->getOrgans().value(selected);const QString filter=search->text().trimmed(),type=category->currentText();
+    QSignalBlocker blocker(medicines);medicines->clear();int selectedRow=-1;
+    for(const auto& med:Database::getInstance().getAllMedicines()){
+        if(type=="推荐治疗"){
+            if(selected.isEmpty()||!state.isDiseased){if(med.type!="保健品")continue;}
+            else if(!engine->medicineMatches(state,med))continue;
+        }else if(type!="全部"&&type!=med.type)continue;
+        QString text=med.name+" "+med.indication;
+        for(const auto& id:med.indication.split('|'))text+=" "+Database::getInstance().getDiseaseById(id).name;
+        if(!filter.isEmpty()&&!text.contains(filter,Qt::CaseInsensitive))continue;
+        auto* item=new QListWidgetItem(QString("%1   ·   %2").arg(med.name,QLocale().toString(med.price)),medicines);
+        item->setData(Qt::UserRole,med.id);item->setToolTip(med.usage+"\n"+med.sideEffectsDesc);
+        if(previous==med.id)selectedRow=medicines->count()-1;
+    }
+    if(medicines->count())medicines->setCurrentRow(selectedRow>=0?selectedRow:0);
+    refreshMedicineDetail();
+}
+void MainWindow::refreshMedicineDetail(){
+    if(!medicines->currentItem()){medicineInfo->setText("没有符合条件的治疗方式。");treatButton->setEnabled(false);return;}
+    const auto med=Database::getInstance().getMedicineById(medicines->currentItem()->data(Qt::UserRole).toString());
+    QSignalBlocker blocker(dosage);dosage->setMaximum(med.type=="手术"?1:10);
+    QString target=med.type=="保健品"?"全身体征":selected.isEmpty()?"请先选择器官":selected;
+    medicineInfo->setText(QString("<b>%1</b><br><span style='color:#8da7a3'>%2 · %3<br>副作用：%4<br>目标：%5　安全数量：%6</span>")
+        .arg(med.name.toHtmlEscaped(),med.type,med.usage.toHtmlEscaped(),med.sideEffectsDesc.toHtmlEscaped(),target).arg(med.safeDosage));
+    if(med.id=="M52")medicineInfo->setText(medicineInfo->text()+"<br><span style='color:#ecd2a4'>支持治疗：仅暂时控制病情，不会直接治愈。</span>");
+    treatButton->setToolTip("优先处理选中器官的当前主病。治疗失败后需推进至少 1 个 Tick 才能重试。");
+    int cost=med.price*dosage->value();treatButton->setText(QString("使用 · %1").arg(QLocale().toString(cost)));
+    treatButton->setEnabled(!engine->isFinished()&&!engine->hasPendingMilestone()&&engine->getMoney()>=cost
+        &&(med.type=="保健品"||!selected.isEmpty()));
+}
+void MainWindow::treat(){
+    if(!medicines->currentItem())return;
+    const QString id=medicines->currentItem()->data(Qt::UserRole).toString();
+    const auto med=Database::getInstance().getMedicineById(id);
+    QString conflict;
+    if(engine->checkConflict(id,conflict)){log("当前用药与"+conflict+"冲突，等待药效消退后再试。");return;}
+    if(interactive&&(med.type=="手术"||med.price*dosage->value()>=20000)){
+        PauseScope pause(engine,elapsed);
+        if(QMessageBox::question(this,"确认治疗",QString("在%1使用%2，费用 %3 金币。\n%4\n是否继续？")
+            .arg(med.type=="保健品"?"全身":selected,med.name,QLocale().toString(med.price*dosage->value()),
+                med.id=="M52"?"这是支持治疗：只暂时控制病情，不会直接治愈。":med.type=="手术"?"分期治疗可能失败；失败仍会消耗费用并损失生命，需等待至少 1 个 Tick 才能重试。":"治疗效果与当前病情及方案有关。"),
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return;
+    }
+    int oldMoney=engine->getMoney();
+    bool ok=engine->applyMedicine(selected,id,dosage->value());
+    if(oldMoney!=engine->getMoney())anatomy->playTreatment(selected.isEmpty()?"心脏":selected,id,ok);
+    refresh();
+}
+void MainWindow::log(const QString& message){
+    journal->append(QString("<span style='color:#7a9f97'>%1 岁</span>　%2").arg(engine->getAge()).arg(message.toHtmlEscaped()));
+}
+void MainWindow::newGame(){
+    PauseScope pause(engine,elapsed);
+    StartupDialog dialog(this);
+    if(dialog.exec()!=QDialog::Accepted){setPaused(true);pause.before=true;return;}
+    // A new life gets a new history: retain the previous automatic checkpoint.
+    const auto previousAuto=savePath("autosave");
+    if(!previousAuto.isEmpty()&&QFileInfo::exists(previousAuto)){
+        const auto backup=savePath(SaveRepository::createManualSlot());
+        if(backup.isEmpty()||!QFile::copy(previousAuto,backup)){
+            QMessageBox::warning(this,"未能保留上一人生","旧自动档无法备份，因此没有开始新人生。请确认存档位置有可用空间与写入权限。");
+            return;
+        }
+    }
+    if(hasCurrentSession&&saveDirty&&!writeManualSave())return;
+    suppressSaveTracking=true;
+    engine->initGame();engine->setPlayerAttributes(dialog.getPlayerName(),dialog.getWealth(),dialog.getLuck(),dialog.getConstitution(),dialog.getResearch());
+    suppressSaveTracking=false;hasCurrentSession=true;saveDirty=false;autosaveArmed=false;
+    journal->clear();log("新的人生开始。观察体征、关注器官变化，尝试活到 110 岁。");
+    speed->setValue(20);selectOrgan("");manualPause=false;pause.before=false;pauseButton->setText("暂停");refresh();
+}
+QList<SaveEntry> MainWindow::saveEntries()const{
+    return saveRoot.isEmpty()?SaveRepository::entries():SaveRepository::Store(saveRoot).entries();
+}
+QString MainWindow::savePath(const QString& slot)const{
+    return saveRoot.isEmpty()?SaveRepository::pathFor(slot):SaveRepository::Store(saveRoot).pathFor(slot);
+}
+bool MainWindow::writeManualSave(){
+    if(!hasCurrentSession){log("请先开始或载入一段人生。");return false;}
+    const auto path=savePath(SaveRepository::createManualSlot());
+    if(path.isEmpty()){
+        QMessageBox::warning(this,"保存失败","无法建立可写的存档位置；已有存档未改变。");return false;
+    }
+    if(!engine->saveGame(path)){
+        QMessageBox::warning(this,"保存失败",engine->lastError());return false;
+    }
+    log("已创建独立手动存档，可在「存档管理」中继续；其他存档未覆盖。");
+    statusBar()->showMessage("手动存档已保存 · 在存档管理中查看",6000);
     return true;
 }
-
-void MainWindow::updateOrganButtonState(const QString& organName, bool isDiseased) {
-    OrganState state = engine->getOrgans()[organName];
-    
-    // 根据 severity 决定颜色
-    QString severityColor = "red"; // 默认红色
-    QString borderColor = "red";
-    QString textColor = "white";
-    if (isDiseased) {
-        switch (state.currentDisease.severity) {
-            case 1: severityColor = "#4CAF50"; borderColor = "#388E3C"; break; // 绿
-            case 2: severityColor = "#CDDC39"; borderColor = "#AFB42B"; textColor = "black"; break; // 较深的黄绿色 (Lime)
-            case 3: severityColor = "#FF9800"; borderColor = "#F57C00"; break; // 橙
-            case 4: severityColor = "#F44336"; borderColor = "#D32F2F"; break; // 红
-            case 5: severityColor = "#9C27B0"; borderColor = "#7B1FA2"; break; // 紫
-            default: severityColor = "#F44336"; borderColor = "#D32F2F"; break;
-        }
-    } else {
-        // 如果是健康状态，也要确保颜色重置
-        severityColor = "rgba(224, 224, 224, 200)";
-        textColor = "black";
+bool MainWindow::writeAutosave(bool showFailure){
+    if(!interactive||!hasCurrentSession||!autosaveArmed||!saveDirty||suppressSaveTracking)return true;
+    if(engine->hasPendingMilestone())return false;
+    const auto path=savePath("autosave");
+    if(path.isEmpty()||!engine->saveGame(path)){
+        const auto message=path.isEmpty()?QString("无法建立可写的存档位置。"):engine->lastError();
+        statusBar()->showMessage("自动保存失败："+message,10000);
+        if(showFailure)QMessageBox::warning(this,"自动保存失败",message+"\n已有存档未改变。");
+        return false;
     }
-
-    if (organName == "皮肤") {
-        // 特殊处理皮肤：它是背景图片，不是按钮
-        QString fileName = isDiseased ? "disease_skin.png" : "healthy_skin.png";
-        QPixmap skinPixmap = ResourceManager::getInstance().getTexture(fileName);
-        
-        QSize bgSize = bodyBackgroundLabel->size();
-        if (bgSize.isEmpty() || bgSize.width() < 100) {
-            bgSize = QSize(600, 600);
-        }
-        bodyBackgroundLabel->setPixmap(skinPixmap.scaled(bgSize, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-        
-        if (isDiseased) {
-            bodyBackgroundLabel->setStyleSheet(QString("border: 4px solid %1; background-color: #ffebee;").arg(borderColor));
-        } else {
-            bodyBackgroundLabel->setStyleSheet("border: 2px solid #ccc; background-color: #f5f5f5;");
-        }
-    } else if (organButtons.contains(organName)) {
-        QPushButton *btn = organButtons[organName];
-        if (isDiseased) {
-            btn->setStyleSheet(QString("background-color: %1; color: %2; font-size: 14px; font-weight: bold; border-radius: 40px; border: 4px solid %3;")
-                               .arg(severityColor, textColor, borderColor));
-            btn->setText(organName + "\n(病变!)");
-        } else {
-            btn->setStyleSheet("background-color: rgba(224, 224, 224, 200); color: black; font-size: 14px; font-weight: bold; border-radius: 40px; border: none;");
-            btn->setText(organName);
-        }
-    }
-    
-    if (currentViewedOrgan == organName) showOrganDetail(organName);
-    
-    // 如果器官刚刚治愈，并且此时全身都已经健康，自动恢复时间流速到默认的 2.0x
-    if (!isDiseased && areAllOrgansHealthy()) {
-        if (timeSlider->value() < 20) { // 只有在流速低于 2.0 时才恢复
-            timeSlider->setValue(20);
-            updateTimerInterval();
-        }
-    }
+    saveDirty=false;
+    statusBar()->showMessage("已自动保存 · "+QString::number(engine->getAge())+" 岁 · "+QTime::currentTime().toString("HH:mm:ss"),4000);
+    return true;
 }
-
-void MainWindow::crossFadeImage(QLabel* label, const QPixmap& newPixmap) {
-    if (!label) return;
-
-    // 如果想做淡入淡出动画，可以使用 QGraphicsOpacityEffect
-    QGraphicsOpacityEffect *effect = new QGraphicsOpacityEffect(label);
-    label->setGraphicsEffect(effect);
-    
-    QPropertyAnimation *anim = new QPropertyAnimation(effect, "opacity");
-    anim->setDuration(300); // 300ms 动画
-    anim->setStartValue(0.0);
-    anim->setEndValue(1.0);
-    
-    label->setPixmap(newPixmap.scaled(512, 512, Qt::KeepAspectRatio));
-    anim->start(QAbstractAnimation::DeleteWhenStopped);
-}
-
-QString MainWindow::getOrganFileName(const QString& organName) {
-    if (organName == "心脏") return "heart";
-    if (organName == "肺部") return "lungs";
-    if (organName == "胃部") return "stomach";
-    if (organName == "肝脏") return "liver";
-    if (organName == "皮肤") return "skin";
-    return "unknown";
-}
-
-void MainWindow::showOrganDetail(const QString &organName) {
-    currentViewedOrgan = organName;
-    OrganState state = engine->getOrgans()[organName];
-
-    // 从本地加载资源，使用英文文件名避免中文路径在 Qt 构建时出现乱码或找不到的问题
-    QString organFileBase = getOrganFileName(organName);
-    QString fileName = state.isDiseased ? "disease_" + organFileBase + ".png" : "healthy_" + organFileBase + ".png";
-    QPixmap pixmap = ResourceManager::getInstance().getTexture(fileName);
-    
-    // 平滑切换贴图
-    crossFadeImage(organDetailImageLabel, pixmap);
-
-    if (state.isDiseased) {
-        QString severityColorStr;
-        QString severityText;
-        switch (state.currentDisease.severity) {
-            case 1: severityColorStr = "#4CAF50"; severityText = "1级(轻微)"; break;
-            case 2: severityColorStr = "#AFB42B"; severityText = "2级(普通)"; break; // 在白色背景下，详情页用稍深的颜色
-            case 3: severityColorStr = "#FF9800"; severityText = "3级(中度)"; break;
-            case 4: severityColorStr = "#F44336"; severityText = "4级(严重)"; break;
-            case 5: severityColorStr = "#9C27B0"; severityText = "5级(致命)"; break;
-            default: severityColorStr = "red"; severityText = QString("%1级").arg(state.currentDisease.severity); break;
-        }
-
-        // 针对5级分阶段治疗的 UI 进度提示
-        QString stageInfo = "";
-        if (state.currentDisease.severity == 5 && !state.currentDisease.treatmentStages.isEmpty()) {
-            int total = state.currentDisease.treatmentStages.size();
-            int current = state.currentTreatmentStage;
-            QString diseasePeriod;
-            if (state.diseaseStage == 1) diseasePeriod = "早期";
-            else if (state.diseaseStage == 2) diseasePeriod = "中期";
-            else if (state.diseaseStage == 3) diseasePeriod = "晚期";
-            
-            // 新增：给玩家明确的当前阶段用药提示
-            QString nextStepHint = "未知方案";
-            if (current < total) {
-                QString reqMedId = state.currentDisease.treatmentStages[current];
-                Medicine reqMed = Database::getInstance().getMedicineById(reqMedId);
-                nextStepHint = reqMed.name.isEmpty() ? "未知道具" : reqMed.name;
-            } else {
-                nextStepHint = "治疗即将完成";
+void MainWindow::saveGame(){PauseScope pause(engine,elapsed);writeManualSave();}
+void MainWindow::loadGame(){showSaveManager();}
+void MainWindow::showSaveManager(bool startup){
+    bool startAnotherLife=false;
+    {
+        PauseScope pause(engine,elapsed);
+        QDialog dialog(this);dialog.setObjectName("saveManager");dialog.setWindowTitle("人生存档");dialog.resize(710,520);
+        auto* layout=new QVBoxLayout(&dialog);layout->setContentsMargins(24,22,24,22);layout->setSpacing(12);
+        layout->addWidget(label(startup?"继续你的人生":"人生存档","heading"));
+        auto* explanation=label("自动档记录最近进展；手动档独立保留。载入后暂停，点击「继续」才推进时间。","muted");
+        explanation->setWordWrap(true);layout->addWidget(explanation);
+        auto* list=new QListWidget;list->setObjectName("saveSlotList");layout->addWidget(list,1);
+        auto* note=label("","muted");note->setWordWrap(true);note->setTextFormat(Qt::PlainText);layout->addWidget(note);
+        const auto folder=saveRoot.isEmpty()?SaveRepository::directory():saveRoot;
+        auto* location=label(folder.isEmpty()?"没有可写的存档位置：请检查磁盘空间与权限。":"存档位置："+folder,"muted");
+        location->setTextFormat(Qt::PlainText);location->setWordWrap(true);
+        location->setToolTip("优先保存在游戏旁的 saves 文件夹；不可写时自动使用当前用户的应用数据目录。");layout->addWidget(location);
+        auto* actions=new QHBoxLayout;
+        auto* create=new QPushButton("新建手动档");create->setObjectName("createManualSave");
+        auto* resume=new QPushButton("继续此存档");resume->setObjectName("resumeSave");
+        auto* fresh=new QPushButton("新人生");fresh->setObjectName("startNewLife");
+        auto* cancel=new QPushButton("返回");
+        actions->addWidget(create);actions->addStretch();actions->addWidget(fresh);actions->addWidget(resume);actions->addWidget(cancel);layout->addLayout(actions);
+        QList<SaveEntry> entries;
+        auto populate=[&]{
+            entries=saveEntries();list->clear();
+            for(const auto& entry:entries){
+                QString text=QString("%1  ·  %2\n%3 岁  ·  %4  ·  %5")
+                    .arg(entry.slot=="autosave"?"自动存档":"手动存档",entry.name)
+                    .arg(entry.age).arg(entry.modified.toString("yyyy-MM-dd HH:mm:ss"),entry.valid?(entry.finished?"人生已结束 · 可回看":"可继续"):"无法读取 · 原文件保留");
+                auto* item=new QListWidgetItem(text,list);item->setData(Qt::UserRole,entry.slot);
+                if(!entry.valid)item->setForeground(QColor("#ca9a8b"));
             }
-
-            stageInfo = QString("<br><br><b><font color='#9C27B0'>【病情阶段】: %1</font></b><br><b><font color='#9C27B0'>【治疗进度】: 阶段 %2 / %3</font></b><br><b><font color='#F44336'>【当前必须手段】: 请在下方药箱寻找并使用 [%4]</font></b><br><i>提示：阶段治疗如果失败会造成巨大伤害，请保持良好的气运并反复尝试！</i>")
-                            .arg(diseasePeriod).arg(current).arg(total).arg(nextStepHint);
-        }
-
-        diseaseNameLabel->setText(QString("<font color='%1'>病变: %2</font>").arg(severityColorStr, state.currentDisease.name));
-        QString desc = QString("<b>疾病名称:</b> %1<br><b>严重程度:</b> <font color='%2'>%3</font><br><b>临床症状:</b> %4<br><b>自愈预期:</b> %5%6")
-                               .arg(state.currentDisease.name).arg(severityColorStr).arg(severityText).arg(state.currentDisease.symptoms)
-                               .arg(state.autoHealTimer > 0 ? QString("存在自愈可能 (剩余 %1 Ticks)").arg(state.autoHealTimer) : "需药物干预")
-                               .arg(stageInfo);
-        symptomTextEdit->setHtml(desc);
-        guideBtn->show(); // 生病时显示提示按钮
-    } else {
-        diseaseNameLabel->setText("<font color='green'>健康状态</font>");
-        symptomTextEdit->setHtml("<b>状态:</b> 器官功能正常，未发现病变。");
-        guideBtn->hide(); // 健康时隐藏提示按钮
+            if(!entries.isEmpty())list->setCurrentRow(0);
+            else note->setText("还没有存档。开始新人生后会自动保存，也可以随时创建独立手动档。");
+            create->setEnabled(hasCurrentSession&&!engine->hasPendingMilestone());
+            resume->setEnabled(!entries.isEmpty()&&entries.first().valid&&!engine->hasPendingMilestone());
+        };
+        connect(list,&QListWidget::currentRowChanged,&dialog,[&](int row){
+            const bool found=row>=0&&row<entries.size();
+            resume->setEnabled(found&&entries[row].valid&&!engine->hasPendingMilestone());
+            resume->setText(found&&entries[row].finished?"查看此人生":"继续此存档");
+            if(found)note->setText(entries[row].valid?"每次载入都会完整校验；如校验失败，当前人生不会改变。":"此存档无法读取，文件已保留，不会自动删除或覆盖。请选择其他存档。");
+        });
+        connect(create,&QPushButton::clicked,&dialog,[&]{if(writeManualSave())populate();});
+        auto restore=[&]{
+            const int row=list->currentRow();if(row<0||row>=entries.size()||!entries[row].valid)return;
+            const auto path=savePath(entries[row].slot);
+            if(path.isEmpty()){QMessageBox::warning(&dialog,"读取失败","存档位置不可用，当前人生未改变。");return;}
+            if(hasCurrentSession&&saveDirty&&!writeManualSave())return;
+            suppressSaveTracking=true;
+            const bool loaded=engine->loadGame(path);suppressSaveTracking=false;
+            if(!loaded){QMessageBox::warning(&dialog,"读取失败",engine->lastError());return;}
+            hasCurrentSession=true;saveDirty=false;autosaveArmed=false;
+            manualPause=true;pause.before=true;pauseButton->setText(engine->isFinished()?"已结束":"继续");
+            speed->setValue(qRound(engine->getTimeMultiplier()*10));
+            log(engine->isFinished()?"已载入结束的人生，可继续观察记录与身体。":"存档已恢复；暂停期间不会覆盖自动档，点击「继续」推进时间。");
+            refresh();dialog.accept();
+        };
+        connect(resume,&QPushButton::clicked,&dialog,restore);
+        connect(list,&QListWidget::itemDoubleClicked,&dialog,[&](QListWidgetItem*){if(resume->isEnabled())restore();});
+        connect(fresh,&QPushButton::clicked,&dialog,[&]{startAnotherLife=true;dialog.accept();});
+        connect(cancel,&QPushButton::clicked,&dialog,&QDialog::reject);
+        populate();dialog.exec();
     }
-    stackedWidget->setCurrentIndex(1);
+    if(startAnotherLife)newGame();
 }
-
-void MainWindow::showTreatmentGuide() {
-    if (currentViewedOrgan.isEmpty()) return;
-    OrganState state = engine->getOrgans()[currentViewedOrgan];
-    if (!state.isDiseased) return;
-
-    QString guide = state.currentDisease.treatmentGuide;
-    
-    QMessageBox msgBox(this);
-    msgBox.setWindowTitle("专家诊疗指南");
-    msgBox.setText("<b>" + state.currentDisease.name + " 治疗指南</b>");
-    msgBox.setInformativeText(guide);
-    msgBox.setIcon(QMessageBox::Information);
-    msgBox.setStyleSheet("QLabel{min-width: 400px;}");
-    msgBox.exec();
-}
-
-void MainWindow::appendLogMessage(const QString& msg) {
-    logTextEdit->append(QString("[%1岁] %2").arg(engine->getAge()).arg(msg));
-    logTextEdit->verticalScrollBar()->setValue(logTextEdit->verticalScrollBar()->maximum());
-}
-
-void MainWindow::returnToBodyView() {
-    currentViewedOrgan = "";
-    stackedWidget->setCurrentIndex(0);
-}
-
-void MainWindow::useMedicine() {
-    QPushButton *btn = qobject_cast<QPushButton*>(sender());
-    if (!btn) return;
-    QString medId = btn->property("medId").toString();
-    Medicine med = Database::getInstance().getMedicineById(medId);
-
-    // 保健品等全局药品可以直接使用，不需要进入器官详情页
-    if (med.type != "保健品" && currentViewedOrgan.isEmpty()) {
-        QMessageBox::warning(this, "提示", "请先点击一个器官进入详情页，再使用药物或进行手术！");
-        return;
+void MainWindow::closeEvent(QCloseEvent* event){
+    PauseScope pause(engine,elapsed);
+    if(engine->hasPendingMilestone()){
+        if(interactive)QMessageBox::information(this,"请先完成寿命事件","当前寿命事件尚未完成，暂不能保存。完成选择后再关闭，已有存档会保留。");
+        event->ignore();return;
     }
-
-    // 1. 冲突检查
-    QString conflictName;
-    if (engine->checkConflict(medId, conflictName)) {
-        int ret = QMessageBox::critical(this, "严重用药冲突", 
-            QString("警告！该药物与您当前正在承受副作用的药物 [%1] 存在严重冲突，可能导致致命后果！是否坚持服用？").arg(conflictName),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (ret == QMessageBox::No) return;
+    if(!writeAutosave(true)){
+        if(QMessageBox::question(this,"进度尚未保存","自动保存失败。仍要关闭吗？未保存的进度会丢失。",QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes){event->ignore();return;}
     }
-
-    // 2. 剂量输入
-    bool ok;
-    int dosage = QInputDialog::getInt(this, "用药剂量/手术次数", "请输入使用数量 (1为标准):", 1, 1, 10, 1, &ok);
-    if (ok) {
-        engine->applyMedicine(currentViewedOrgan, medId, dosage);
-        
-        // 用药后可能会改变健康状态，立刻刷新一下当前页面的贴图
-        if (!currentViewedOrgan.isEmpty()) {
-            showOrganDetail(currentViewedOrgan);
-        }
+    QMainWindow::closeEvent(event);
+}
+void MainWindow::runCheckup(){
+    if(interactive){
+        PauseScope pause(engine,elapsed);
+        if(QMessageBox::question(this,"全身体检",QString("支付 %1 金币进行全身体检？\n当前科研对应体检间隔为 %2 年。")
+            .arg(QLocale().toString(engine->getCheckupCost())).arg(engine->getCheckupInterval()),
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::Yes)!=QMessageBox::Yes)return;
     }
+    engine->performCheckup();refresh();
 }
-
-void MainWindow::showGameOver(const QString& reason) {
-    if (gameTimer) gameTimer->stop();
-    if (realTimeTimer) realTimeTimer->stop();
-    
-    QMessageBox::critical(this, "Game Over", reason);
-    close();
-}
-
-void MainWindow::filterMedicines(const QString& searchText) {
-    // 根据搜索框文本过滤药品按钮显示
-    for (auto it = medicineButtons.begin(); it != medicineButtons.end(); ++it) {
-        QPushButton *btn = it.value();
-        QString medName = btn->text();
-        QString indication = btn->property("indication").toString();
-        
-        // 如果搜索文本为空，或者药品名称包含搜索文本，或者适应症(疾病ID)包含搜索文本，则显示，否则隐藏
-        if (searchText.isEmpty() || 
-            medName.contains(searchText, Qt::CaseInsensitive) ||
-            indication.contains(searchText, Qt::CaseInsensitive)) {
-            btn->show();
-        } else {
-            btn->hide();
-        }
+void MainWindow::handleMilestone(int type){
+    if(!interactive||engine->isFinished()||!engine->hasPendingMilestone())return;
+    PauseScope pause(engine,elapsed);
+    if(type==80||type==100){
+        bool ok;
+        QString name=QInputDialog::getText(this,"寿命管理",QString("%1 岁：已解锁寿命延长项目。\n为这项技术命名（仍需支付项目费用）：").arg(type),
+            QLineEdit::Normal,type==80?"基因修复疗法":"端粒修复技术",&ok);
+        engine->setLifeExtensionTechName(ok?name:"基因修复疗法");
     }
+    bool accepts=QMessageBox::question(this,"寿命大限",
+        QString("当前 %1 岁。\n支付 %2 金币延长 10 年寿命？支付后确定成功。\n当前金币：%3\n不支付将结束本次人生。")
+            .arg(engine->getAge()).arg(QLocale().toString(engine->getLifeExtensionCost()),QLocale().toString(engine->getMoney())),QMessageBox::Yes|QMessageBox::No)==QMessageBox::Yes;
+    if(!accepts||!engine->payForLifeExtension())engine->declineLifeExtension();
+    refresh();
 }
-
-void MainWindow::saveGame() {}
-void MainWindow::loadGame() {}
-
-void MainWindow::flashScreen() {
-    flashOverlay->setGeometry(this->rect());
-    flashOverlay->raise();
-    flashOverlay->show();
-
-    QGraphicsOpacityEffect *effect = new QGraphicsOpacityEffect(flashOverlay);
-    flashOverlay->setGraphicsEffect(effect);
-    
-    QPropertyAnimation *anim = new QPropertyAnimation(effect, "opacity");
-    anim->setDuration(500);
-    anim->setStartValue(1.0);
-    anim->setEndValue(0.0);
-    connect(anim, &QPropertyAnimation::finished, flashOverlay, &QWidget::hide);
-    anim->start(QAbstractAnimation::DeleteWhenStopped);
-}
-
-bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
-    if (watched == bodyBackgroundLabel) {
-        if (event->type() == QEvent::Resize) {
-            // 当背景标签调整大小时，重新计算并绝对定位器官按钮
-            int w = bodyBackgroundLabel->width();
-            int h = bodyBackgroundLabel->height();
-            
-            // 每次 Resize 时也保持皮肤图片的比例缩放
-            OrganState skinState = engine->getOrgans()["皮肤"];
-            QString fileName = skinState.isDiseased ? "disease_skin.png" : "healthy_skin.png";
-            QPixmap skinPixmap = ResourceManager::getInstance().getTexture(fileName);
-            bodyBackgroundLabel->setPixmap(skinPixmap.scaled(w, h, Qt::KeepAspectRatio));
-
-            // 基于中心的相对偏移量排布（可根据实际人体背景图调整比例）
-            if (organButtons.contains("心脏")) organButtons["心脏"]->move(w/2 - 10, h/2 - 80);
-            if (organButtons.contains("肺部")) organButtons["肺部"]->move(w/2 - 40, h/2 - 120);
-            if (organButtons.contains("胃部")) organButtons["胃部"]->move(w/2 + 20, h/2 - 10);
-            if (organButtons.contains("肝脏")) organButtons["肝脏"]->move(w/2 - 50, h/2 - 10);
-        } else if (event->type() == QEvent::MouseButtonPress) {
-            // 点击背景区域（皮肤），显示皮肤详情
-            showOrganDetail("皮肤");
-            return true;
-        }
-    }
-    return QMainWindow::eventFilter(watched, event);
+void MainWindow::showGameOver(const QString& reason){
+    if(!engine->isFinished())return;
+    manualPause=true;engine->setPaused(true);pauseButton->setText("已结束");
+    log(reason);
+    if(interactive)QMessageBox::information(this,engine->getAge()>=110?"漫长的一生":"人生结束",
+        reason+"\n\n可以继续观察身体，读取存档，或点击「新人生」重新开始。");
+    refresh();
 }

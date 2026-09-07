@@ -16,6 +16,7 @@ public:
     Disease getDiseaseById(const QString& id);
     QVector<Medicine> getMedicinesForDisease(const QString& diseaseId);
     QVector<Medicine> getAllMedicines();
+    QVector<Disease> getAllDiseases() const { return diseases.values().toVector(); }
     Medicine getMedicineById(const QString& id); // 新增
 
 private:

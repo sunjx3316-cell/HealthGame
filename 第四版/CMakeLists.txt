@@ -1,46 +1,50 @@
-cmake_minimum_required(VERSION 3.16)
-
-project(HealthGame VERSION 0.1 LANGUAGES CXX)
-
-# 设置 C++17 标准
+cmake_minimum_required(VERSION 3.22)
+project(HealthGame VERSION 0.6.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# 开启 Qt 自动构建工具
-set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC ON)
-
-# 查找 Qt 包（优先找 Qt6，如果没有则找 Qt5）
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Gui Widgets Network)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Widgets Network)
-
-# 添加可执行文件及其源代码
-add_executable(HealthGame
-    main.cpp
-    mainwindow.cpp
-    mainwindow.h
-    Models.h
-    Database.cpp
-    Database.h
-    GameEngine.cpp
-    GameEngine.h
-    ResourceManager.h
-    ResourceManager.cpp
-    StartupDialog.h
-    StartupDialog.cpp
-    resources.qrc
-)
-
-# 链接 Qt 库
-target_link_libraries(HealthGame PRIVATE
-    Qt${QT_VERSION_MAJOR}::Core
-    Qt${QT_VERSION_MAJOR}::Gui
-    Qt${QT_VERSION_MAJOR}::Widgets
-    Qt${QT_VERSION_MAJOR}::Network
-)
-
-# 针对 Windows 系统，设置为 GUI 应用（隐藏控制台窗口）
-if(WIN32)
-    set_target_properties(HealthGame PROPERTIES WIN32_EXECUTABLE ON)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets)
+add_library(healthgame_core STATIC GameEngine.cpp GameEngine.h Database.cpp Database.h Models.h DiseaseVisual.cpp DiseaseVisual.h DiseaseRules.cpp DiseaseRules.h SaveRepository.cpp SaveRepository.h)
+target_link_libraries(healthgame_core PUBLIC Qt6::Core Qt6::Gui)
+target_include_directories(healthgame_core PUBLIC .)
+add_library(healthgame_ui STATIC mainwindow.cpp mainwindow.h StartupDialog.cpp StartupDialog.h
+    AnatomyGeometry.cpp AnatomyGeometry.h AnatomyView.cpp AnatomyView.h AnatomyShaders.h AnatomyLab.cpp AnatomyLab.h)
+target_link_libraries(healthgame_ui PUBLIC healthgame_core Qt6::Widgets Qt6::OpenGLWidgets Qt6::OpenGL)
+add_executable(HealthGame WIN32 main.cpp)
+target_link_libraries(HealthGame PRIVATE healthgame_ui)
+add_custom_target(anatomy_assets ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/anatomy" "${CMAKE_CURRENT_BINARY_DIR}/anatomy")
+add_dependencies(HealthGame anatomy_assets)
+if(MSVC)
+    target_compile_options(healthgame_core PRIVATE /utf-8 /W4)
+    target_compile_options(healthgame_ui PRIVATE /utf-8 /W4)
+else()
+    target_compile_options(healthgame_core PRIVATE -Wall -Wextra)
+    target_compile_options(healthgame_ui PRIVATE -Wall -Wextra)
+endif()
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    add_executable(healthgame_tests tests/GameEngineTests.cpp)
+    target_link_libraries(healthgame_tests PRIVATE healthgame_core Qt6::Test)
+    add_test(NAME game_mechanics COMMAND healthgame_tests)
+    add_executable(healthgame_save_tests tests/SaveRepositoryTests.cpp)
+    target_link_libraries(healthgame_save_tests PRIVATE healthgame_core Qt6::Test)
+    add_test(NAME save_repository COMMAND healthgame_save_tests)
+    add_executable(healthgame_balance_tests tests/BalanceSimulation.cpp)
+    target_link_libraries(healthgame_balance_tests PRIVATE healthgame_core Qt6::Test)
+    add_test(NAME balance_simulation COMMAND healthgame_balance_tests)
+    add_executable(healthgame_save_flow_tests tests/SaveFlowTests.cpp)
+    target_link_libraries(healthgame_save_flow_tests PRIVATE healthgame_ui Qt6::Test)
+    add_test(NAME save_flow COMMAND healthgame_save_flow_tests)
+    add_executable(healthgame_visual_tests tests/AnatomyTests.cpp)
+    target_link_libraries(healthgame_visual_tests PRIVATE healthgame_ui Qt6::Test)
+    add_test(NAME anatomy_visuals COMMAND healthgame_visual_tests)
+    set_tests_properties(anatomy_visuals PROPERTIES LABELS "gui")
+    if(WIN32)
+        # Prefer the runtime shipped with the selected Qt installation over unrelated PATH DLLs.
+        set_tests_properties(game_mechanics save_repository balance_simulation save_flow anatomy_visuals
+            PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
 endif()

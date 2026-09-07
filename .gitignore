@@ -1,0 +1,9 @@
+build*/
+dist/
+*.user
+*.user.*
+*.save.json
+**/saves/*.json
+verification/
+asset-work/
+verification-mechanics.txt

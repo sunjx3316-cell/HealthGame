@@ -10,7 +10,7 @@ void Database::init() {
 
     // 辅助宏用于添加疾病
     #define ADD_DISEASE(id, name, organ, minAge, maxAge, prob, severity, symptoms, damage, guide) \
-        diseases[id] = {id, name, organ, minAge, maxAge, prob, severity, symptoms, damage, guide, {}}
+        diseases[id] = {id, name, organ, minAge, maxAge, prob, severity, symptoms, damage, guide, {}, {}, {}, {}}
 
     // 辅助宏用于添加药物 (修正初始化列表，补全所有字段)
     // 默认 effectPercentage=100, safeDosage=1, penaltyCoefficient=5.0, 空副作用, 空不兼容列表
@@ -18,7 +18,7 @@ void Database::init() {
         medicines[id] = {id, name, indication, usage, sideEffects, 100, 1, 5.0, SideEffect{0, 0, 0.0}, {}, priceVal, typeVal}
 
     // ==========================================
-    // 疾病库 (50种) 严格限定器官: 心脏, 肺部, 胃部, 肝脏, 皮肤
+    // 疾病库 (54种) 以五个器官分区组织；分区不等于病灶解剖结构。
     // 婴儿期 (0-5)
     ADD_DISEASE("D01", "先天性心脏病", "心脏", 0, 5, 0.01, 5, "心杂音，呼吸急促，喂养困难", 30, "【诊疗指南】先天性心脏病是胎儿时期心脏血管发育异常所致。建议尽早采用【先心病手术包】进行外科干预，标准用量：1。");
     ADD_DISEASE("D02", "急性咽炎", "肺部", 0, 5, 0.05, 2, "咽痛，咳嗽，发热", 15, "【诊疗指南】上呼吸道感染常见表现，多为病毒性。建议【小儿氨酚黄那敏颗粒】对症支持，标准用量：1。");
@@ -67,8 +67,8 @@ void Database::init() {
     ADD_DISEASE("D40", "急性胰腺炎", "胃部", 18, 100, 0.05, 4, "剧烈上腹痛，呕吐，发热", 15, "【诊疗指南】胰酶在胰腺内被激活引起的组织自身消化（消化系统急症）。需使用【奥曲肽注射液】强效抑制胰液分泌，标准用量：1。");
 
     ADD_DISEASE("D51", "2型糖尿病综合征", "肝脏", 40, 100, 0.25, 4, "多饮，多尿，消瘦，血糖失控", 20, "【诊疗指南】胰岛素抵抗及进行性分泌缺陷。需终身规律皮下注射【精蛋白锌胰岛素注射液】。");
-    ADD_DISEASE("D52", "重度肝功能衰竭", "肝脏", 50, 100, 0.05, 5, "少尿，全身水肿，电解质崩溃", 30, "【诊疗指南】肝功能不可逆丧失。需长期进行【人工肝血液净化包】或等待【同种异体肝移植术】。");
-    ADD_DISEASE("D53", "重型心脏骤停", "心脏", 50, 100, 0.10, 5, "突发偏瘫，失语，意识模糊", 30, "【诊疗指南】心脏骤停导致脑部缺血。紧急推注【阿替普酶溶栓治疗(心脏)】。");
+    ADD_DISEASE("D52", "重度肝功能衰竭", "肝脏", 50, 100, 0.05, 5, "少尿，全身水肿，电解质崩溃", 30, "【游戏治疗】人工肝支持只能暂时控制本次病情，并不根治器官损伤；需继续维护，或选择同种异体肝移植。移植后仍有维护负担，也不代表永远不会再患肝病。");
+    ADD_DISEASE("D53", "心脏骤停（急救事件）", "心脏", 50, 100, 0.10, 5, "突发意识丧失，呼吸异常，循环中断（游戏表现）", 30, "【游戏急救事件】本事件立即显性发作，使用【急救复苏组合包】完成游戏内救治。组合包是急救过程的抽象，不对应单一药物或现实操作步骤；成功后仍需恢复与风险管理。");
     ADD_DISEASE("D41", "老年性肺气肿", "肺部", 60, 100, 0.20, 3, "桶状胸，进行性呼吸困难", 15, "【诊疗指南】终末细支气管远端气腔弹性减退、过度膨胀。推荐长期使用【布地奈德福莫特罗粉吸入剂】抗炎平喘，标准用量：1。");
     ADD_DISEASE("D42", "急性心肌梗死", "心脏", 40, 100, 0.08, 5, "剧烈胸骨后疼痛，大汗，濒死感", 30, "【诊疗指南】冠状动脉急性闭塞导致心肌坏死。必须在黄金时间窗内急救。\n【早期】使用【阿替普酶溶栓治疗】。\n【中期】先用【【早期】冠脉支架植入术】，后用【阿替普酶溶栓治疗】。\n【晚期】先用【【中期】冠脉搭桥术】，后用【【晚期】ECMO体外生命支持】。");
     ADD_DISEASE("D43", "老年瓣膜性心脏病", "心脏", 60, 100, 0.10, 4, "心悸，气促，心绞痛", 15, "【诊疗指南】心脏瓣膜随年龄增长发生退行性钙化。重度狭窄需进行【瓣膜置换术】，标准用量：1。");
@@ -129,16 +129,16 @@ void Database::init() {
     ADD_MEDICINE("M42", "阿替普酶溶栓治疗", "D42", "静脉注射", "出血危险", 5000, "药剂");
     ADD_MEDICINE("M43", "瓣膜置换术", "D43", "开胸手术", "抗凝并发症", 100000, "手术");
     ADD_MEDICINE("M44", "索拉非尼", "D44", "靶向口服", "手足综合征", 12000, "药剂");
-    ADD_MEDICINE("M45", "氟尿嘧啶化疗", "D45", "静脉化疗", "骨髓抑制，脱发", 3000, "药剂");
+    ADD_MEDICINE("M45", "氟尿嘧啶化疗", "D44", "肝脏肿瘤中期的第二个游戏治疗阶段", "骨髓抑制，脱发（游戏治疗负担）", 3000, "药剂");
     ADD_MEDICINE("M46", "哌拉西林他唑巴坦", "D46|D17|D18", "静脉滴注", "过敏反应", 150, "药剂");
     ADD_MEDICINE("M47", "美托洛尔缓释片", "D47", "口服", "心动过缓", 30, "药剂");
     ADD_MEDICINE("M48", "胃复春片", "D48", "口服中成药", "偶有口干", 40, "药剂");
     ADD_MEDICINE("M49", "异甘草酸镁注射液", "D49|D23", "静脉滴注", "血压轻度升高", 120, "药剂");
     ADD_MEDICINE("M50", "无创呼吸机支持", "D50", "物理治疗", "面部压伤", 5000, "手术");
     ADD_MEDICINE("M51", "精蛋白锌胰岛素注射液", "D51", "皮下注射", "低血糖风险", 80, "药剂");
-    ADD_MEDICINE("M52", "人工肝血液净化包", "D52", "体外循环透析", "低血压，感染", 5000, "手术");
-    ADD_MEDICINE("M53", "同种异体肝移植术", "D52", "器官移植手术", "排异反应，终身免疫抑制", 300000, "手术");
-    ADD_MEDICINE("M54", "阿替普酶溶栓治疗(心脏)", "D53", "静脉推注", "心内出血风险", 8000, "药剂");
+    ADD_MEDICINE("M52", "人工肝支持治疗包", "D52", "暂缓本次肝衰竭，非根治；后续仍需维护或移植", "支持期结束后病情可能再次失控（游戏规则）", 5000, "手术");
+    ADD_MEDICINE("M53", "同种异体肝移植术", "D52", "替换受损肝脏并进入长期维护；不能获得所有肝病免疫", "移植后持续维护负担（游戏抽象，非现实用药建议）", 300000, "手术");
+    ADD_MEDICINE("M54", "急救复苏组合包", "D53", "完成一个急救处置阶段（游戏抽象）", "复苏后的恢复负担；不代表单一药物即可复苏", 8000, "手术");
     
     // ==========================================
     // 新增：针对5级疾病的早、中、晚期分阶段特效药物/手术
@@ -156,24 +156,25 @@ void Database::init() {
     // 添加通用药物，不绑定特定疾病，用于玩家选错药的选项
     ADD_MEDICINE("M_GEN_02", "板蓝根颗粒", "ALL", "口服", "无", 20, "药剂");
     
-    // 【新增万金油方案】可以广谱治疗特定器官的所有疾病，但副作用巨大且效果打折
-    ADD_MEDICINE("M_BROAD_HEART", "【万金油】强效强心剂", "HEART_ALL", "静脉推注", "严重心律失常", 2000, "药剂");
-    ADD_MEDICINE("M_BROAD_LUNGS", "【万金油】广谱抗生素(肺)", "LUNGS_ALL", "静脉滴注", "重度肝肾损伤", 2000, "药剂");
-    ADD_MEDICINE("M_BROAD_STOMACH", "【万金油】全能胃肠康", "STOMACH_ALL", "口服", "严重便秘", 2000, "药剂");
-    ADD_MEDICINE("M_BROAD_LIVER", "【万金油】顶级保肝药", "LIVER_ALL", "静脉滴注", "低血糖昏迷", 2000, "药剂");
-    ADD_MEDICINE("M_BROAD_SKIN", "【万金油】超级激素软膏", "SKIN_ALL", "外敷", "重度皮肤萎缩", 2000, "药剂");
-    ADD_MEDICINE("M_BROAD_SUPER", "【终极神药】九转还魂丹", "ALL_DISEASES", "口服", "剧毒", 99999, "药剂");
+    // Game-only fallback: limited to level 1–3 conditions without a required
+    // procedure. It cannot replace surgery, staged care or major-disease care.
+    ADD_MEDICINE("M_BROAD_HEART", "【通用缓解】心脏支持包", "HEART_ALL", "仅限心脏1–3级非操作性病症；有失败风险", "额外治疗负担，不替代精确方案（游戏道具）", 500, "药剂");
+    ADD_MEDICINE("M_BROAD_LUNGS", "【通用缓解】呼吸支持包", "LUNGS_ALL", "仅限肺部1–3级非操作性病症；有失败风险", "额外治疗负担，不替代精确方案（游戏道具）", 350, "药剂");
+    ADD_MEDICINE("M_BROAD_STOMACH", "【通用缓解】胃肠支持包", "STOMACH_ALL", "仅限胃部1–3级非操作性病症；不能替代阑尾手术", "额外治疗负担，不替代精确方案（游戏道具）", 350, "药剂");
+    ADD_MEDICINE("M_BROAD_LIVER", "【通用缓解】肝脏支持包", "LIVER_ALL", "仅限肝脏1–3级非操作性病症；不能替代胆囊手术", "额外治疗负担，不替代精确方案（游戏道具）", 500, "药剂");
+    ADD_MEDICINE("M_BROAD_SKIN", "【通用缓解】皮肤支持包", "SKIN_ALL", "仅限皮肤1–3级非操作性病症；有失败风险", "额外治疗负担，不替代精确方案（游戏道具）", 250, "药剂");
+    ADD_MEDICINE("M_BROAD_SUPER", "【通用缓解】应急支持包", "ALL_DISEASES", "仅限1–3级非操作性病症；不能治疗重大病或替代手术", "额外治疗负担，有失败风险（游戏道具）", 1500, "药剂");
 
     // 【新增保健品】用于控制血压、血糖、血脂
-    ADD_MEDICINE("M_SUPP_01", "维生素C含片(微效)", "SUPP_IMMUNE", "口服", "无明显副作用", 1000, "保健品");
+    ADD_MEDICINE("M_SUPP_01", "免疫支持·基础", "SUPP_IMMUNE", "临时补充2点免疫；收益会缓慢消退，与其他免疫支持共享冷却", "临时支持不能替代体质天赋（游戏道具）", 1000, "保健品");
     ADD_MEDICINE("M_SUPP_02", "降压药片(保健)", "SUPP_BP", "口服", "低血压风险", 500, "保健品");
     ADD_MEDICINE("M_SUPP_03", "深海鱼油(降脂)", "SUPP_LIPID", "口服", "无", 800, "保健品");
     ADD_MEDICINE("M_SUPP_04", "二甲双胍(降糖)", "SUPP_SUGAR", "口服", "胃肠道不适", 300, "保健品");
     
-    // 新增：高级免疫力保健品
-    ADD_MEDICINE("M_SUPP_05", "野生极品人参(中效)", "SUPP_IMMUNE", "口服", "上火流鼻血", 8000, "保健品");
-    ADD_MEDICINE("M_SUPP_06", "极草冬虫夏草(强效)", "SUPP_IMMUNE", "口服", "无", 25000, "保健品");
-    ADD_MEDICINE("M_SUPP_07", "胸腺肽肠溶片(特效)", "SUPP_IMMUNE", "口服", "免疫紊乱风险", 60000, "保健品");
+    // Temporary game-resource support, not claims about real supplement efficacy.
+    ADD_MEDICINE("M_SUPP_05", "免疫支持·标准", "SUPP_IMMUNE", "临时补充6点免疫；收益会缓慢消退，与其他免疫支持共享冷却", "临时支持不能替代体质天赋（游戏道具）", 3500, "保健品");
+    ADD_MEDICINE("M_SUPP_06", "免疫支持·加强", "SUPP_IMMUNE", "临时补充12点免疫；收益会缓慢消退，与其他免疫支持共享冷却", "临时支持不能替代体质天赋（游戏道具）", 8000, "保健品");
+    ADD_MEDICINE("M_SUPP_07", "免疫支持·集中", "SUPP_IMMUNE", "临时补充18点免疫；收益会缓慢消退，与其他免疫支持共享冷却", "临时支持不能替代体质天赋（游戏道具）", 14000, "保健品");
 
     // ==========================================
     // 深度建模扩展：为5级疾病配置早中晚期分阶段治疗方案
@@ -234,12 +235,39 @@ void Database::init() {
         med.sideEffectData.probability = 0.1;
     }
 
-    // 手动配置部分典型药物的深度属性 (冲突与高危副作用)
-    medicines["M02"].incompatibleMeds.append("M18"); // 阿莫西林 与 头孢类 模拟冲突
-    medicines["M18"].incompatibleMeds.append("M02");
-    
-    medicines["M21"].incompatibleMeds.append("M42"); // 硝酸甘油 与 溶栓药 冲突
-    medicines["M42"].incompatibleMeds.append("M21");
+    // Game-only interaction: the two alternative antihistamines cannot be stacked.
+    // Do not block drugs explicitly required together by a staged treatment.
+    medicines["M16"].incompatibleMeds.append("M19");
+    medicines["M19"].incompatibleMeds.append("M16");
+
+    // Continuous age coverage: pediatric conditions cover 6–12; adult diseases
+    // remain eligible after age 100 (the engine separately suppresses level 5).
+    for (auto& disease : diseases) {
+        if (disease.maxAge == 5 && disease.severity < 5) disease.maxAge = 12;
+        if (disease.maxAge == 100) disease.maxAge = 110;
+    }
+    diseases["D14"].minAge = 6;
+    diseases["D15"].minAge = 6;
+    // Keep a familiar repeatable minor infection available throughout life.
+    diseases["D10"].maxAge = 110;
+
+    diseases["D01"].treatmentGuide += "\n【游戏规则】先天性原发事件每局仅一次；修复后仍可能患其他心脏疾病。";
+    diseases["D08"].treatmentGuide += "\n【游戏规则】先天性原发事件每局仅一次；重建后仍可能患其他肝胆疾病。";
+    diseases["D29"].treatmentGuide += "\n【游戏规则】成功切除阑尾后不再生成阑尾炎，胃肠其他病种不受此保护。通用支持包不能替代本手术。";
+    diseases["D37"].treatmentGuide += "\n【游戏规则】成功切除胆囊后，急性胆囊炎与胆囊结石相关事件均不再生成；肝脏本身仍可患病。";
+    diseases["D43"].treatmentGuide += "\n【游戏规则】瓣膜置换后有较长的同病稳定窗口，但不屏蔽心脏其他病种。";
+    for (const auto& id : {"D34", "D35", "D44", "D45"})
+        diseases[id].treatmentGuide += "\n【游戏规则】局部肿瘤切除不代表终身免癌；完成治疗后进入同病恢复保护期。";
+    diseases["D42"].treatmentGuide += "\n【游戏规则】这是即刻显性的急症事件，不会按肿瘤方式潜伏多年；分期表示关卡救治阶段。";
+    for (auto& disease : diseases)
+        disease.treatmentGuide += "\n【模拟边界】疾病概率、病程、疗效与用量均为游戏参数，不可用于现实诊疗。";
+
+    for (auto& med : medicines) {
+        if (med.id.startsWith("M_BROAD_")) {
+            med.effectPercentage = 50;
+            med.sideEffectData = {8, 5, 0.5};
+        }
+    }
 
     medicines["M11"].safeDosage = 2; // 沙丁胺醇喷雾可以喷两次
     medicines["M11"].sideEffectData = {10, 3, 0.3}; // 心悸副作用较强
@@ -264,7 +292,9 @@ Disease Database::getDiseaseById(const QString& id) {
 QVector<Medicine> Database::getMedicinesForDisease(const QString& diseaseId) {
     QVector<Medicine> result;
     for (const auto& med : medicines) {
-        if (med.indication == diseaseId) {
+        const auto disease = diseases.value(diseaseId);
+        if (med.indication.split('|').contains(diseaseId) || disease.earlyTreatment.contains(med.id)
+            || disease.midTreatment.contains(med.id) || disease.lateTreatment.contains(med.id)) {
             result.push_back(med);
         }
     }

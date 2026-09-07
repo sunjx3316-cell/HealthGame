@@ -8,12 +8,12 @@ struct Disease {
     QString id;
     QString name;
     QString organ;
-    int minAge;
-    int maxAge;
-    double probability; // 0.0 - 1.0
-    int severity;       // 1-5
+    int minAge = 0;
+    int maxAge = 110;
+    double probability = 0;
+    int severity = 1;
     QString symptoms;
-    int damagePerTick;  // 根据 severity 设定: 1,2级-5; 3,4级-15; 5级-30
+    int damagePerTick = 0;
     QString treatmentGuide; // 【新增】专业的治病科普指南
     
     // 5级绝症的分阶段治疗方案 (存储每一阶段需要的药物/手术 ID)
@@ -27,9 +27,9 @@ struct Disease {
 
 // 药品副作用数据结构
 struct SideEffect {
-    int hpPenalty;        // 生命值扣减值
-    int durationTicks;    // 持续时间
-    double probability;   // 触发概率 (0.0-1.0)
+    int hpPenalty = 0;
+    int durationTicks = 0;
+    double probability = 0;
 };
 
 // 药品模型
@@ -39,11 +39,11 @@ struct Medicine {
     QString indication; // 对应疾病ID
     QString usage;
     QString sideEffectsDesc;
-    int effectPercentage; // 0-100 (治疗效果值)
+    int effectPercentage = 0;
     
     // 深度建模新增字段
-    int safeDosage;           // 安全剂量
-    double penaltyCoefficient;// 过量服用时的单位惩罚系数
+    int safeDosage = 1;
+    double penaltyCoefficient = 5;
     SideEffect sideEffectData;// 副作用具体数值
     QList<QString> incompatibleMeds; // 不可混用药物列表
     
@@ -55,8 +55,9 @@ struct Medicine {
 // 当前服用的副作用状态
 struct ActiveSideEffect {
     QString medicineName;
-    int remainingTicks;
-    int hpPenaltyPerTick;
+    int remainingTicks = 0;
+    double hpPenaltyPerTick = 0;
+    QString medicineId;
 };
 
 // 器官状态模型
@@ -77,8 +78,19 @@ struct OrganState {
     // 新增：临床器官不可逆状态标记
     bool isRemoved; // 是否已被完全切除（如阑尾、胆囊），切除后器官不可再生任何病
     bool isTransplanted; // 是否已进行过移植（如心脏、肝脏）
-    QList<QString> removedDiseases; // 记录已被【局部切除】或【根治】的特定疾病ID，防止同一种肿瘤/结石在同部位复发
+    QList<QString> removedDiseases; // 兼容存档的结构标记：仅 D29=阑尾、D37=胆囊；肿瘤切除不产生终身免疫
+    double damageTaken = 0; // 本次病程实际扣血；治疗不能借小病恢复其他来源的损伤
+    int treatmentFailures = 0;
+    int treatmentReadyTick = 0;
+    int controlledUntilTick = 0;
+    QList<OrganState> coexisting; // 同器官合并病；只保存一层，优先展示/治疗较严重的已确诊病
     
     OrganState() : name(""), isDiseased(false), diseasedDays(0), autoHealTimer(0), currentTreatmentStage(0), hasHiddenDisease(false), diseaseStage(0), hiddenTicks(0), isRemoved(false), isTransplanted(false) {}
     OrganState(QString n) : name(n), isDiseased(false), diseasedDays(0), autoHealTimer(0), currentTreatmentStage(0), hasHiddenDisease(false), diseaseStage(0), hiddenTicks(0), isRemoved(false), isTransplanted(false) {}
+};
+
+struct DiseaseHistory {
+    int episodes = 0;
+    int lastOnsetTick = -1000;
+    int lastRecoveryTick = -1000;
 };
