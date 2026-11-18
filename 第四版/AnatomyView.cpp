@@ -1,12 +1,20 @@
 #include "AnatomyView.h"
 #include "Database.h"
 #include "AnatomyShaders.h"
+#include "LifeShape.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QOpenGLContext>
 #include <QLinearGradient>
 #include <QPainterPath>
+#include <QFile>
+#include <QDir>
+#include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <cstring>
 #include <cmath>
 #include <algorithm>
 
@@ -28,7 +36,7 @@ void AnatomyView::cleanup(){
     if(!context())return;
     makeCurrent();
     for(auto& mesh:meshes)destroy(mesh);
-    destroy(lesionMesh);program.removeAllShaders();ready=false;doneCurrent();
+    destroy(lesionMesh);destroy(portrait);program.removeAllShaders();ready=false;doneCurrent();
 }
 void AnatomyView::destroy(Mesh& m){
     if(m.vbo)glDeleteBuffers(1,&m.vbo);
@@ -53,6 +61,40 @@ void AnatomyView::upload(Mesh& mesh,const AnatomyModel& source){
     glEnableVertexAttribArray(2);glVertexAttribPointer(2,1,GL_FLOAT,GL_FALSE,sizeof(AnatomyVertex),reinterpret_cast<void*>(offsetof(AnatomyVertex,cavity)));
     glBindVertexArray(0);
 }
+bool AnatomyView::loadPortrait(){
+    QDir dir(QCoreApplication::applicationDirPath()+"/anatomy");
+    QFile file(dir.filePath("portrait.mesh")),manifest(dir.filePath("portrait.json"));
+    if(!file.open(QIODevice::ReadOnly)||!manifest.open(QIODevice::ReadOnly))return false;
+    auto doc=QJsonDocument::fromJson(manifest.readAll()).object();
+    auto data=qUncompress(file.readAll());
+    constexpr int stride=24*sizeof(float);
+    if(doc["stride"].toInt()!=24||data.isEmpty()||data.size()%stride)return false;
+    int cursor=0;
+    for(const auto& item:doc["parts"].toArray()){
+        auto p=item.toObject();int count=p["count"].toInt(),layer=p["layer"].toInt();
+        if(count<=0||count%3||p["first"].toInt()!=cursor||qint64(cursor)+count>data.size()/stride)return false;
+        auto c=p["color"].toArray();if(c.size()!=3)return false;
+        QVector3D lo(1e5,1e5,1e5),hi(-1e5,-1e5,-1e5);
+        for(int i=cursor;i<cursor+count;++i){
+            float xyz[3];std::memcpy(xyz,data.constData()+qint64(i)*stride,sizeof(xyz));
+            for(int j=0;j<3;++j){lo[j]=std::min(lo[j],xyz[j]);hi[j]=std::max(hi[j],xyz[j]);}
+        }
+        portrait.ranges<<Range{cursor,count,layer,layer==2?QString("皮肤"):QString(),
+            {float(c[0].toDouble()),float(c[1].toDouble()),float(c[2].toDouble()),1},
+            layer==8?.24f:.68f,p["name"].toString(),lo,hi};
+        cursor+=count;
+    }
+    if(cursor!=data.size()/stride)return false;
+    portrait.triangles=cursor/3;
+    glGenVertexArrays(1,&portrait.vao);glGenBuffers(1,&portrait.vbo);
+    glBindVertexArray(portrait.vao);glBindBuffer(GL_ARRAY_BUFFER,portrait.vbo);
+    glBufferData(GL_ARRAY_BUFFER,data.size(),data.constData(),GL_STATIC_DRAW);
+    for(int i=0;i<8;++i){
+        int slot=i<2?i:i+1;glEnableVertexAttribArray(slot);
+        glVertexAttribPointer(slot,3,GL_FLOAT,GL_FALSE,stride,reinterpret_cast<void*>(quintptr(i*3*sizeof(float))));
+    }
+    glBindVertexArray(0);return true;
+}
 void AnatomyView::initializeGL(){
     if(!initializeOpenGLFunctions()){glError="无法初始化 OpenGL 3.3，请更新显卡驱动。";return;}
     connect(context(),&QOpenGLContext::aboutToBeDestroyed,this,&AnatomyView::cleanup,Qt::DirectConnection);
@@ -62,7 +104,18 @@ void AnatomyView::initializeGL(){
     }
     auto body=AnatomyGeometry::body();
     if(!AnatomyGeometry::error().isEmpty()){glError=AnatomyGeometry::error();return;}
+    body.parts.removeIf([](const AnatomyPart& part){
+        // The overview window exposes the thorax and abdomen. In oblique views
+        // a skull or a forearm from the atlas must never project into that opening.
+        const auto& name=part.structure;
+        if(part.layer==0)return name=="Tongue"||name=="Oropharynx"||name.startsWith("Palatine tonsil");
+        if(part.layer!=3)return true;
+        return !(name.contains(" rib")||name.contains("sternum")||name=="Xiphoid process"
+            ||name.startsWith("Clavicle")||name.startsWith("Scapula")
+            ||name.startsWith("Vertebra T")||name.startsWith("Vertebra L"));
+    });
     upload(meshes[""],body);
+    if(!loadPortrait()){glError="人物形态资源损坏或缺失，请完整解压游戏。";return;}
     for(const auto& name:{"心脏","肺部","肝脏","胃部","皮肤"})
         upload(meshes[QString::fromUtf8(name)],AnatomyGeometry::organ(QString::fromUtf8(name)));
     ready=true;lesionsDirty=true;
@@ -83,13 +136,13 @@ void AnatomyView::setStates(const QMap<QString,OrganState>& value){
     }
     update();
 }
-void AnatomyView::setAge(float years){age=std::clamp(years,0.f,110.f);update();}
+void AnatomyView::setAge(float years){years=std::clamp(years,0.f,110.f);if(age!=years){age=years;update();}}
 void AnatomyView::setCutaway(bool e){cutaway=e;update();}
-void AnatomyView::setSkinVisible(bool e){skinVisible=e;update();}
+void AnatomyView::setDissectionWindow(bool e){dissection=e;update();}
 void AnatomyView::setAutoRotate(bool e){autoRotate=e;update();}
 void AnatomyView::setAnimationEnabled(bool e){animate=e;update();}
 void AnatomyView::resetCamera(){yaw=selected.isEmpty()?-8:-18;pitch=selected.isEmpty()?0:8;zoom=1;emit cameraChanged();update();}
-int AnatomyView::triangleCount()const{return meshes.contains(selected)?meshes[selected].triangles:0;}
+int AnatomyView::triangleCount()const{return selected.isEmpty()?portrait.triangles+(dissection?meshes.value("").triangles:0):meshes.value(selected).triangles;}
 void AnatomyView::playTreatment(const QString& organ,const QString& id,bool success){
     effectOrgan=organ;effectMedicine=id;effectSuccess=success;treatmentClock.restart();update();
 }
@@ -107,67 +160,69 @@ void AnatomyView::refreshLesions(){
     }else combined=AnatomyGeometry::lesions(selected,visuals.value(selected));
     upload(lesionMesh,combined);lesionsDirty=false;
 }
-void AnatomyView::renderMesh(const Mesh& mesh,bool lesionPass){
+void AnatomyView::renderMesh(const Mesh& mesh,RenderPass pass){
     glBindVertexArray(mesh.vao);
+    bool character=&mesh==&portrait;
+    program.setUniformValue("portraitMesh",character);
+    program.setUniformValue("aperturePass",pass==RenderPass::Aperture);
+    const bool lesionPass=pass==RenderPass::Lesion;
     const float seconds=animate?clock.elapsed()/1000.0f:0;
-    for(int pass=0;pass<3;++pass){
-        for(const auto& range:mesh.ranges){
-            if(!visibleStructure(range))continue;
-            bool shell=range.layer==2;
-            if(shell!=(pass>0))continue;
-            if(shell&&!skinVisible)continue;
-            auto v=visuals.value(range.organ);
-            bool affected=AnatomyGeometry::affected(range.structure,v);
-            const auto organState=states.value(range.organ);
-            if(range.structure.contains("Vermiform appendix")&&organState.removedDiseases.contains("D29"))continue;
-            if(range.structure=="Gallbladder"&&organState.removedDiseases.contains("D37"))continue;
-            if(selected.isEmpty()&&v.id=="D05"&&range.organ=="皮肤"){
-                affected=range.structure.contains("digits",Qt::CaseInsensitive)||range.structure.contains("palm",Qt::CaseInsensitive)
-                    ||range.structure.contains("sole",Qt::CaseInsensitive)||range.structure.contains("dorsum",Qt::CaseInsensitive);
-                v.systemic=true;
-            }
-            QMatrix4x4 local;
-            if(selected.isEmpty()&&!range.organ.isEmpty())local=AnatomyGeometry::bodyPlacement(range.organ).inverted();
-            program.setUniformValue("localMatrix",local);
-            program.setUniformValue("baseColor",range.color);
-            program.setUniformValue("layer",range.layer);
-            program.setUniformValue("skin",shell);
-            program.setUniformValue("gastric",range.structure=="Mucosa of stomach");
-            program.setUniformValue("cuttable",range.layer==0||range.structure=="Mucosa of stomach"||range.structure.contains("segment of liver",Qt::CaseInsensitive));
-            program.setUniformValue("shellPass",pass==2?1:0);
-            program.setUniformValue("affected",affected);
-            program.setUniformValue("physicalScale",selected.isEmpty()?AnatomyGeometry::bodyPlacement(range.organ)(0,0):1.f);
-            program.setUniformValue("expansion",v.expansion);
-            program.setUniformValue("cutaway",cutaway&&!selected.isEmpty()&&!lesionPass);
-            program.setUniformValue("systemic",v.systemic);
-            program.setUniformValue("pattern",range.layer==3||lesionPass?0:v.pattern);
-            program.setUniformValue("amount",v.amount);
-            program.setUniformValue("roughness",range.roughness);
-            program.setUniformValue("focus",v.focus);
-            program.setUniformValue("diseaseColor",QVector3D(float(v.color.redF()),float(v.color.greenF()),float(v.color.blueF())));
-            float beat=1;
-            // In overview keep shared world coordinates stable; animate detailed anatomy.
-            if(!selected.isEmpty()&&!lesionPass){
-                if(selected=="心脏"){
-                    float rate=v.pattern?v.pulse:1;
-                    float wave=rate==0?0:std::pow(std::max(0.0f,std::sin(seconds*7.2f*rate)),8);
-                    if(v.pattern==9&&rate>0)wave*=0.65f+0.35f*std::sin(seconds*13);
-                    beat+=wave*0.025f;
-                }else if(selected=="肺部")beat+=0.011f*std::sin(seconds*2.1f)*(v.pattern?v.pulse:1);
-
-            }
-            program.setUniformValue("beat",beat);
-            glDepthMask(pass==2?GL_FALSE:GL_TRUE);
-            // Two passes on translucent shell: back then front, no opaque self-occlusion.
-            if(shell&&pass==2){
-                glEnable(GL_CULL_FACE);glCullFace(GL_FRONT);
-                glDrawArrays(GL_TRIANGLES,range.first,range.count);
-                glCullFace(GL_BACK);glDrawArrays(GL_TRIANGLES,range.first,range.count);
-                glDisable(GL_CULL_FACE);
-            }else glDrawArrays(GL_TRIANGLES,range.first,range.count);
+    for(const auto& range:mesh.ranges){
+        if(!character&&!visibleStructure(range))continue;
+        const bool windowSurface=character&&dissection&&range.structure=="Patient surface";
+        if(pass==RenderPass::Aperture&&!windowSurface)continue;
+        program.setUniformValue("windowSurface",windowSurface);
+        auto v=visuals.value(range.organ);
+        bool affected=!lesionPass&&AnatomyGeometry::affected(range.structure,v);
+        const auto organState=states.value(range.organ);
+        if(range.structure.contains("Vermiform appendix")&&organState.removedDiseases.contains("D29"))continue;
+        if(range.structure=="Gallbladder"&&organState.removedDiseases.contains("D37"))continue;
+        if(selected.isEmpty()&&v.id=="D05"&&range.organ=="皮肤"){
+            affected=range.structure.contains("digits",Qt::CaseInsensitive)||range.structure.contains("palm",Qt::CaseInsensitive)
+                ||range.structure.contains("sole",Qt::CaseInsensitive)||range.structure.contains("dorsum",Qt::CaseInsensitive);
+            v.systemic=true;
         }
+        QMatrix4x4 local;
+        if(selected.isEmpty()&&!range.organ.isEmpty())local=AnatomyGeometry::bodyPlacement(range.organ).inverted();
+        program.setUniformValue("localMatrix",local);
+        program.setUniformValue("baseColor",range.color);
+        program.setUniformValue("layer",range.layer);
+        program.setUniformValue("skin",range.layer==2);
+        program.setUniformValue("hair",range.layer==9||range.layer==10);
+        program.setUniformValue("lowerArm",range.structure=="forearm"||range.structure=="palm and digits");
+        if(range.layer==8){
+            program.setUniformValue("eyeCenter",(range.high+range.low)*.5f);
+            program.setUniformValue("eyeRadius",(range.high-range.low)*.5f);
+        }
+        program.setUniformValue("gastric",range.structure=="Mucosa of stomach");
+        program.setUniformValue("cuttable",range.layer==0||range.structure=="Mucosa of stomach"||range.structure.contains("segment of liver",Qt::CaseInsensitive));
+        program.setUniformValue("affected",affected);
+        program.setUniformValue("physicalScale",selected.isEmpty()?AnatomyGeometry::bodyPlacement(range.organ)(0,0):1.f);
+        program.setUniformValue("expansion",v.expansion);
+        program.setUniformValue("cutaway",cutaway&&!selected.isEmpty());
+        program.setUniformValue("sectionDepth",v.id=="D37"?v.focus.z()-.07f:.05f);
+        program.setUniformValue("phenotype",v.catalogNumber);
+        program.setUniformValue("systemic",v.systemic);
+        program.setUniformValue("pattern",range.layer==3||lesionPass?0:v.pattern);
+        program.setUniformValue("amount",v.amount);
+        program.setUniformValue("roughness",range.roughness);
+        program.setUniformValue("focus",v.focus);
+        program.setUniformValue("diseaseColor",QVector3D(float(v.color.redF()),float(v.color.greenF()),float(v.color.blueF())));
+        float beat=1;
+        // In overview keep shared world coordinates stable; animate detailed anatomy.
+        if(!selected.isEmpty()){
+            if(selected=="心脏"){
+                float rate=v.pattern?v.pulse:1;
+                float wave=rate==0?0:std::pow(std::max(0.0f,std::sin(seconds*7.2f*rate)),8);
+                if(v.pattern==9&&rate>0)wave*=0.65f+0.35f*std::sin(seconds*13);
+                beat+=wave*0.025f;
+            }else if(selected=="肺部")beat+=0.011f*std::sin(seconds*2.1f)*(v.pattern?v.pulse:1);
+
+        }
+        program.setUniformValue("beat",beat);
+        glDrawArrays(GL_TRIANGLES,range.first,range.count);
     }
-    glDepthMask(GL_TRUE);glBindVertexArray(0);
+    glBindVertexArray(0);
 }
 void AnatomyView::paintGL(){
     if(ready){
@@ -201,7 +256,10 @@ void AnatomyView::paintGL(){
             for(int k=0;k<3;++k){low[k]=std::min(low[k],range.low[k]);high[k]=std::max(high[k],range.high[k]);}
         }
         center=(low+high)*.5f*detailScale();
-        framing=std::max(.40f,(high-low).length()*.49f/mesh.radius);
+        const auto half=(high-low)*.5f*detailScale();
+        const float aspect=float(width())/std::max(1,height());
+        const float fit=std::max(half.y()+.14f*half.z(),(half.x()+.25f*half.z())/aspect);
+        framing=(fit*4.12f+half.z())/(mesh.radius*3.7f);
     }
     float distance=mesh.radius*(selected.isEmpty()?3.4f:3.7f)*framing/zoom;
     projection.setToIdentity();projection.perspective(34,float(width())/std::max(1,height()),0.1f,60);
@@ -209,18 +267,46 @@ void AnatomyView::paintGL(){
     model.setToIdentity();model.rotate(pitch,1,0,0);model.rotate(yaw,0,1,0);model.translate(-center);
     painter.beginNativePainting();
     glViewport(0,0,int(width()*devicePixelRatioF()),int(height()*devicePixelRatioF()));
-    glClear(GL_DEPTH_BUFFER_BIT);
+    glDepthMask(GL_TRUE);glDisable(GL_STENCIL_TEST);
+    glStencilMask(0xff);glClearStencil(0);
+    glClear(GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);glDepthFunc(GL_LEQUAL);glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDisable(GL_CULL_FACE);
     if(lesionsDirty)refreshLesions();
     program.bind();
     program.setUniformValue("overview",selected.isEmpty());
     program.setUniformValue("age",age);
-    program.setUniformValue("ageParameters",AnatomyGeometry::ageParameters(age));
+    const auto growth=LifeShape::at(age);
+    program.setUniformValue("lifeLengths",growth.length);
+    program.setUniformValue("lifeBuild",growth.build);
+    program.setUniformValue("lifeFace",growth.face);
+    auto ease=[](float t){t=std::clamp(t,0.f,1.f);return t*t*(3-2*t);};
+    const float infant=1-ease(age/8),adult=ease((age-8)/17),elder=ease((age-45)/55);
+    program.setUniformValue("portraitWeights",QVector4D(adult*(1-elder),infant,1-infant-adult,elder));
     program.setUniformValue("detailScale",detailScale());
     program.setUniformValue("model",model);program.setUniformValue("view",view);program.setUniformValue("projection",projection);
     program.setUniformValue("normalMatrix",model.normalMatrix());program.setUniformValue("cameraPosition",QVector3D(0,0,distance));
-    renderMesh(mesh);renderMesh(lesionMesh,true);
+    if(selected.isEmpty()){
+        renderMesh(portrait);
+        if(dissection){
+            // Only the visible anterior torso can open a window. Arms and the back
+            // already occupy the depth buffer and occlude it as the patient rotates.
+            glEnable(GL_STENCIL_TEST);
+            glStencilFunc(GL_ALWAYS,1,0xff);glStencilOp(GL_KEEP,GL_KEEP,GL_REPLACE);
+            glDepthMask(GL_FALSE);glDepthFunc(GL_EQUAL);
+            renderMesh(portrait,RenderPass::Aperture);
+            glDepthMask(GL_TRUE);glDepthFunc(GL_LEQUAL);
+            glStencilMask(0);glStencilFunc(GL_EQUAL,1,0xff);
+            glStencilOp(GL_KEEP,GL_KEEP,GL_KEEP);
+            glClear(GL_DEPTH_BUFFER_BIT);
+            renderMesh(mesh);
+            renderMesh(lesionMesh,RenderPass::Lesion);
+            glDisable(GL_STENCIL_TEST);glStencilMask(0xff);
+        }
+    }else{
+        renderMesh(mesh);
+        renderMesh(lesionMesh,RenderPass::Lesion);
+    }
     program.release();glDisable(GL_DEPTH_TEST);glDisable(GL_BLEND);
     painter.endNativePainting();
     painter.end();
@@ -243,9 +329,10 @@ QVector3D AnatomyView::detailScale()const{
 bool AnatomyView::visibleStructure(const Range& r)const{
     const auto v=visuals.value(r.organ);
     const bool affected=AnatomyGeometry::affected(r.structure,v);
-    if(selected.isEmpty())return r.layer!=1;
+    if(selected.isEmpty())return dissection?r.layer!=1:(r.layer==2||r.layer==6);
     if(v.id=="D02")return r.structure.contains("Oropharynx")||r.structure.contains("Palatine tonsil");
     if(v.id=="D07")return r.structure=="Tongue";
+    if(v.id=="D37")return r.structure=="Gallbladder"||r.structure=="Bile duct";
     if(v.id=="D29")return r.structure.contains("colon",Qt::CaseInsensitive)||r.structure=="Vermiform appendix"||r.structure=="Jejunum";
     if(v.id=="D40")return r.structure=="Pancreas"||r.structure=="Duodenum"||r.structure=="Stomach";
     if(r.layer==5)return affected;
@@ -264,9 +351,10 @@ void AnatomyView::drawOverlay(){
     p.setPen(QColor("#bad1cf"));
     p.drawText(QRect(22,height()-35,width()-44,22),Qt::AlignLeft,"拖动旋转  ·  滚轮缩放  ·  双击复位");
     p.setPen(QColor("#5b8c92"));p.drawText(QRect(22,height()-35,width()-44,22),Qt::AlignRight,
-        cutaway?"前侧剖视":skinVisible&&selected.isEmpty()?"解剖窗口":"表面结构");
+        cutaway?"前侧剖视":dissection&&selected.isEmpty()?"胸腹透视":"表面结构");
     p.setPen(QColor("#688b8e"));p.setFont(QFont("Microsoft YaHei UI",8));
-    p.drawText(QRect(22,39,width()-44,20),Qt::AlignLeft,QString("Z-Anatomy / BodyParts3D   ·   %1 万三角面   ·   %2 岁").arg(triangleCount()/10000.,0,'f',1).arg(age,0,'f',0));
+    QString source=selected.isEmpty()?"MakeHuman / Z-Anatomy":"Z-Anatomy / BodyParts3D";
+    p.drawText(QRect(22,39,width()-44,20),Qt::AlignLeft,QString("%1   ·   %2 万三角面   ·   %3 岁").arg(source).arg(triangleCount()/10000.,0,'f',1).arg(int(age)));
     p.drawText(QRect(22,height()-57,width()-44,18),Qt::AlignRight,"解剖图谱来源 · 年龄形态与病灶为游戏示意");
     p.setFont(QFont("Microsoft YaHei UI",9));
     if(selected.isEmpty()){
@@ -362,12 +450,13 @@ void AnatomyView::mouseReleaseEvent(QMouseEvent* e){
     auto near4=inverse*QVector4D(nx,ny,-1,1),far4=inverse*QVector4D(nx,ny,1,1);
     const QVector3D origin=near4.toVector3DAffine(),direction=(far4.toVector3DAffine()-origin).normalized();
     float nearest=1e6f;QString hit;
+    const auto growth=LifeShape::at(age);
     for(const auto& part:AnatomyGeometry::body().parts){
         if(part.organ.isEmpty()||part.layer!=0)continue;
         for(int i=0;i+2<part.vertices.size();i+=3){
-            const auto a=AnatomyGeometry::agePosition(part.vertices[i].position,age);
-            const auto b=AnatomyGeometry::agePosition(part.vertices[i+1].position,age);
-            const auto c=AnatomyGeometry::agePosition(part.vertices[i+2].position,age);
+            const auto a=growth.map(part.vertices[i].position);
+            const auto b=growth.map(part.vertices[i+1].position);
+            const auto c=growth.map(part.vertices[i+2].position);
             const auto edge1=b-a,edge2=c-a,p=QVector3D::crossProduct(direction,edge2);
             const float determinant=QVector3D::dotProduct(edge1,p);if(std::abs(determinant)<1e-8f)continue;
             const float inv=1/determinant;const auto delta=origin-a;

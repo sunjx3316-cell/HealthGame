@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(HealthGame VERSION 0.6.0 LANGUAGES CXX)
+project(HealthGame VERSION 0.7.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -8,7 +8,7 @@ add_library(healthgame_core STATIC GameEngine.cpp GameEngine.h Database.cpp Data
 target_link_libraries(healthgame_core PUBLIC Qt6::Core Qt6::Gui)
 target_include_directories(healthgame_core PUBLIC .)
 add_library(healthgame_ui STATIC mainwindow.cpp mainwindow.h StartupDialog.cpp StartupDialog.h
-    AnatomyGeometry.cpp AnatomyGeometry.h AnatomyView.cpp AnatomyView.h AnatomyShaders.h AnatomyLab.cpp AnatomyLab.h)
+    AnatomyGeometry.cpp AnatomyGeometry.h LifeShape.cpp LifeShape.h LifeWarp.inc AnatomyView.cpp AnatomyView.h AnatomyShaders.h AnatomyLab.cpp AnatomyLab.h)
 target_link_libraries(healthgame_ui PUBLIC healthgame_core Qt6::Widgets Qt6::OpenGLWidgets Qt6::OpenGL)
 add_executable(HealthGame WIN32 main.cpp)
 target_link_libraries(HealthGame PRIVATE healthgame_ui)

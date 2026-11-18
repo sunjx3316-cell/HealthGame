@@ -6,4 +6,5 @@ dist/
 **/saves/*.json
 verification/
 asset-work/
+__pycache__/
 verification-mechanics.txt

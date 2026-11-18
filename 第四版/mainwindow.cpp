@@ -64,6 +64,7 @@ MainWindow::MainWindow(QWidget* parent,bool useDialogs,const QString& saveDirect
     connect(&timer,&QTimer::timeout,this,[this]{
         double seconds=elapsed.restart()/1000.0;
         engine->advanceTime(seconds);
+        anatomy->setAge(engine->visualAge());
     });
     elapsed.start();timer.start(50);refresh();setPaused(true);
     connect(&autosaveTimer,&QTimer::timeout,this,[this]{writeAutosave();});
@@ -169,7 +170,7 @@ void MainWindow::setupUi(){
     auto* canvas=new QVBoxLayout;canvas->setSpacing(8);
     auto* toolbar=new QHBoxLayout;
     titleLabel=label("全身概览","section");toolbar->addWidget(titleLabel);toolbar->addStretch();
-    skinButton=new QPushButton("人体透视");skinButton->setCheckable(true);skinButton->setChecked(true);
+    skinButton=new QPushButton("胸腹透视");skinButton->setCheckable(true);
     cutButton=new QPushButton("内部剖视");cutButton->setCheckable(true);cutButton->setObjectName("cutawayButton");
     auto* rotate=new QPushButton("自动旋转");rotate->setCheckable(true);
     auto* reset=new QPushButton("视角复位");
@@ -177,7 +178,7 @@ void MainWindow::setupUi(){
     canvas->addLayout(toolbar);
     anatomy=new AnatomyView;
     connect(anatomy,&AnatomyView::organSelected,this,&MainWindow::selectOrgan);
-    connect(skinButton,&QPushButton::toggled,anatomy,&AnatomyView::setSkinVisible);
+    connect(skinButton,&QPushButton::toggled,anatomy,&AnatomyView::setDissectionWindow);
     connect(cutButton,&QPushButton::toggled,anatomy,&AnatomyView::setCutaway);
     connect(rotate,&QPushButton::toggled,anatomy,&AnatomyView::setAutoRotate);
     connect(reset,&QPushButton::clicked,anatomy,&AnatomyView::resetCamera);
@@ -195,6 +196,7 @@ void MainWindow::setupUi(){
     researchLabel=label("科研 0 / 17","section");info->addWidget(researchLabel);
     researchInfo=label("","muted");researchInfo->setWordWrap(true);info->addWidget(researchInfo);
     researchButton=new QPushButton("科研训练");researchButton->setObjectName("researchButton");
+    researchButton->setToolTip("18 岁起开放，需满足资金、3 年训练间隔、每局最多提升 5 点及科研总上限 17 的条件。");
     connect(researchButton,&QPushButton::clicked,this,[this]{
         if(engine->buyResearchPoint())log("科研提升 1 点：收入增加，体检与续命成本降低；下一次训练需间隔 3 年。");
     });info->addWidget(researchButton);center->addWidget(inspector);
@@ -211,6 +213,7 @@ void MainWindow::setupUi(){
     auto* selectedMed=new QVBoxLayout;medicineInfo=label("选择一种治疗方式","");medicineInfo->setWordWrap(true);selectedMed->addWidget(medicineInfo,1);
     auto* action=new QHBoxLayout;dosage=new QSpinBox;dosage->setRange(1,10);dosage->setPrefix("数量 ");dosage->setMaximumWidth(100);
     treatButton=new QPushButton("进行治疗");treatButton->setObjectName("primary");treatButton->setMinimumWidth(130);
+    treatButton->setToolTip("优先处理选中器官的当前主病。治疗失败后需推进至少 1 个 Tick 才能重试。");
     action->addWidget(dosage);action->addWidget(treatButton,1);selectedMed->addLayout(action);treatment->addLayout(selectedMed,4);pharmacyLayout->addLayout(treatment,1);
     pharmacy->setFixedHeight(212);bottom->addWidget(pharmacy,3);
     auto* logs=card("card");auto* logLayout=new QVBoxLayout(logs);logLayout->setContentsMargins(14,12,14,10);
@@ -231,7 +234,8 @@ void MainWindow::setPaused(bool value){
 }
 void MainWindow::selectOrgan(const QString& name){
     selected=name;anatomy->setOrgan(name);
-    QSignalBlocker blocker(cutButton);cutButton->setChecked(false);anatomy->setCutaway(false);
+    const bool section=AnatomyGeometry::prefersSection(name,DiseaseVisuals::forState(engine->getOrgans().value(name)));
+    QSignalBlocker blocker(cutButton);cutButton->setChecked(section);anatomy->setCutaway(section);
     refresh();
 }
 void MainWindow::refresh(){
@@ -248,7 +252,7 @@ void MainWindow::refresh(){
              val(engine->getDiastolic(),engine->getDiastolic()>90||engine->getDiastolic()<60,0),
              val(engine->getBloodSugar(),engine->getBloodSugar()>7||engine->getBloodSugar()<3.9,1),
              val(engine->getBloodLipids(),engine->getBloodLipids()>2||engine->getBloodLipids()<0.5,1)));
-    const auto states=engine->getOrgans();anatomy->setAge(age);anatomy->setStates(states);
+    const auto states=engine->getOrgans();anatomy->setAge(engine->visualAge());anatomy->setStates(states);
     bodyButton->setChecked(selected.isEmpty());
     int count=0;
     for(const auto& name:organOrder){
@@ -321,7 +325,6 @@ void MainWindow::refresh(){
     researchInfo->setText(QString("当前年收入 %1 金币\n每次续命 %2 金币 · 支付后成功\n18 岁起训练，每 3 年一次，最多 +5 点")
         .arg(QLocale().toString(age<18?1000:engine->getAnnualIncome()),QLocale().toString(engine->getLifeExtensionCost())));
     researchButton->setText(QString("科研训练 · %1").arg(QLocale().toString(engine->getResearchPointCost())));
-    researchButton->setToolTip("18 岁起开放，需满足资金、3 年训练间隔、每局最多提升 5 点及科研总上限 17 的条件。");
     researchButton->setEnabled(!engine->isFinished()&&!engine->hasPendingMilestone()&&engine->canBuyResearchPoint()&&engine->getMoney()>=engine->getResearchPointCost());
     pauseButton->setEnabled((!interactive||hasCurrentSession)&&!engine->isFinished()&&!engine->hasPendingMilestone());
     refreshMedicines();refreshing=false;
@@ -329,7 +332,11 @@ void MainWindow::refresh(){
 void MainWindow::refreshMedicines(){
     const QString previous=medicines->currentItem()?medicines->currentItem()->data(Qt::UserRole).toString():"";
     const auto state=engine->getOrgans().value(selected);const QString filter=search->text().trimmed(),type=category->currentText();
-    QSignalBlocker blocker(medicines);medicines->clear();int selectedRow=-1;
+    // Both the database and the displayed rows are ordered by medicine ID.
+    // Reconcile only changed rows so a simulation tick cannot disturb selection or hover.
+    QSignalBlocker blocker(medicines);
+    int row=0;
+    bool previousStillAvailable=false;
     for(const auto& med:Database::getInstance().getAllMedicines()){
         if(type=="推荐治疗"){
             if(selected.isEmpty()||!state.isDiseased){if(med.type!="保健品")continue;}
@@ -338,22 +345,31 @@ void MainWindow::refreshMedicines(){
         QString text=med.name+" "+med.indication;
         for(const auto& id:med.indication.split('|'))text+=" "+Database::getInstance().getDiseaseById(id).name;
         if(!filter.isEmpty()&&!text.contains(filter,Qt::CaseInsensitive))continue;
-        auto* item=new QListWidgetItem(QString("%1   ·   %2").arg(med.name,QLocale().toString(med.price)),medicines);
-        item->setData(Qt::UserRole,med.id);item->setToolTip(med.usage+"\n"+med.sideEffectsDesc);
-        if(previous==med.id)selectedRow=medicines->count()-1;
+        while(row<medicines->count()&&medicines->item(row)->data(Qt::UserRole).toString()<med.id)
+            delete medicines->takeItem(row);
+        if(row==medicines->count()||medicines->item(row)->data(Qt::UserRole).toString()!=med.id){
+            auto* item=new QListWidgetItem(QString("%1   ·   %2").arg(med.name,QLocale().toString(med.price)));
+            item->setData(Qt::UserRole,med.id);item->setToolTip(med.usage+"\n"+med.sideEffectsDesc);
+            medicines->insertItem(row,item);
+        }
+        if(previous==med.id)previousStillAvailable=true;
+        ++row;
     }
-    if(medicines->count())medicines->setCurrentRow(selectedRow>=0?selectedRow:0);
+    while(row<medicines->count())delete medicines->takeItem(row);
+    if(row&&!previousStillAvailable)medicines->setCurrentRow(0);
     refreshMedicineDetail();
 }
 void MainWindow::refreshMedicineDetail(){
     if(!medicines->currentItem()){medicineInfo->setText("没有符合条件的治疗方式。");treatButton->setEnabled(false);return;}
     const auto med=Database::getInstance().getMedicineById(medicines->currentItem()->data(Qt::UserRole).toString());
-    QSignalBlocker blocker(dosage);dosage->setMaximum(med.type=="手术"?1:10);
+    QSignalBlocker blocker(dosage);
+    const int maximum=med.type=="手术"?1:10;
+    if(dosage->maximum()!=maximum)dosage->setMaximum(maximum);
     QString target=med.type=="保健品"?"全身体征":selected.isEmpty()?"请先选择器官":selected;
-    medicineInfo->setText(QString("<b>%1</b><br><span style='color:#8da7a3'>%2 · %3<br>副作用：%4<br>目标：%5　安全数量：%6</span>")
-        .arg(med.name.toHtmlEscaped(),med.type,med.usage.toHtmlEscaped(),med.sideEffectsDesc.toHtmlEscaped(),target).arg(med.safeDosage));
-    if(med.id=="M52")medicineInfo->setText(medicineInfo->text()+"<br><span style='color:#ecd2a4'>支持治疗：仅暂时控制病情，不会直接治愈。</span>");
-    treatButton->setToolTip("优先处理选中器官的当前主病。治疗失败后需推进至少 1 个 Tick 才能重试。");
+    QString description=QString("<b>%1</b><br><span style='color:#8da7a3'>%2 · %3<br>副作用：%4<br>目标：%5　安全数量：%6</span>")
+        .arg(med.name.toHtmlEscaped(),med.type,med.usage.toHtmlEscaped(),med.sideEffectsDesc.toHtmlEscaped(),target).arg(med.safeDosage);
+    if(med.id=="M52")description+="<br><span style='color:#ecd2a4'>支持治疗：仅暂时控制病情，不会直接治愈。</span>";
+    medicineInfo->setText(description);
     int cost=med.price*dosage->value();treatButton->setText(QString("使用 · %1").arg(QLocale().toString(cost)));
     treatButton->setEnabled(!engine->isFinished()&&!engine->hasPendingMilestone()&&engine->getMoney()>=cost
         &&(med.type=="保健品"||!selected.isEmpty()));

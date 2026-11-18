@@ -72,7 +72,7 @@ DiseaseVisual DiseaseVisuals::forDisease(const QString& id, int stage, int compl
     DiseaseVisual v;
     if (!catalog().contains(id)) return v;
     const auto e = catalog().value(id);
-    v.id = id; v.pattern = e.pattern; v.title = QString::fromUtf8(e.title);
+    v.id = id; v.catalogNumber=id.mid(1).toInt(); v.pattern = e.pattern; v.title = QString::fromUtf8(e.title);
     v.description = QString::fromUtf8(e.description); v.focus = e.focus; v.systemic = e.systemic;
     // Bind pathology to source-atlas structures, never just the coarse game slot.
     static const QMap<QString,QString> targets{

@@ -1,6 +1,6 @@
 # Anatomical model attribution and license
 
-The files atlas.json and *.mesh in this directory are derived anatomical models,
+The files atlas.json and the body, heart, lungs, liver, stomach and skin meshes in this directory are derived anatomical models,
 distributed under Creative Commons Attribution-ShareAlike 4.0 International
 (CC BY-SA 4.0). This license applies to the anatomical assets, not as a new license
 declaration for the surrounding application code.
@@ -48,3 +48,5 @@ identify changes, and apply the share-alike license.
 
 See CC-BY-SA-4.0.txt for the license. Each part's original anatomical name is
 retained in atlas.json; reproducible conversion code is in scripts/export_anatomy.py.
+
+The character exterior in portrait.mesh is documented separately in PORTRAIT-NOTICE.md.

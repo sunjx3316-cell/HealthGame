@@ -5,8 +5,11 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QSignalBlocker>
 #include <QTemporaryDir>
+#include <random>
+#include <sstream>
 #include "mainwindow.h"
 #include "StartupDialog.h"
 
@@ -28,6 +31,54 @@ class SaveFlowTests : public QObject {
         QDir().mkpath(output);dialog->grab().save(QDir(output).filePath(name+".png"));
     }
 private slots:
+    void recommendedChoiceSurvivesSimulationRefresh(){
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        const QString path=dir.filePath("case.json");QVERIFY(checkpoint(path,"治疗选择"));
+        const auto healthy=contents(path);
+        auto record=QJsonDocument::fromJson(healthy).object();
+        std::ostringstream rng;rng<<std::mt19937(12);record["rng"]=QString::fromStdString(rng.str());
+        auto organs=record["organs"].toArray();
+        for(int i=0;i<organs.size();++i){
+            auto o=organs[i].toObject();if(o["name"]!="肺部")continue;
+            o["disease"]="D10";o["autoHeal"]=10;organs[i]=o;
+        }
+        record["organs"]=organs;record["history"]=QJsonObject{{"D10",QJsonObject{{"episodes",1},{"onset",0},{"recovery",-1000}}}};
+        QFile fixture(path);QVERIFY(fixture.open(QIODevice::WriteOnly));fixture.write(QJsonDocument(record).toJson());fixture.close();
+        MainWindow window(nullptr,false,dir.path());window.timer.stop();
+        window.setAttribute(Qt::WA_DontShowOnScreen);window.show();
+        QCoreApplication::processEvents();
+        QVERIFY2(window.engine->loadGame(path),qPrintable(window.engine->lastError()));
+        window.selectOrgan("肺部");auto* list=window.medicines;QVERIFY(list->count()>1);
+        list->setCurrentRow(1);window.dosage->setValue(2);
+        QPersistentModelIndex choice(list->currentIndex());auto id=choice.data(Qt::UserRole);
+        QSignalSpy resets(list->model(),&QAbstractItemModel::modelReset);
+        QSignalSpy inserted(list->model(),&QAbstractItemModel::rowsInserted);
+        QSignalSpy removed(list->model(),&QAbstractItemModel::rowsRemoved);
+        auto* popup=window.category->view();
+        popup->window()->setAttribute(Qt::WA_DontShowOnScreen);
+        window.category->showPopup();
+        QVERIFY(popup->isVisible());
+        const QModelIndex highlighted=popup->model()->index(2,0);
+        popup->setCurrentIndex(highlighted);
+        window.engine->setPaused(false);
+        for(int i=0;i<3;++i){
+            window.engine->tick();QCoreApplication::processEvents();
+            QVERIFY(popup->isVisible());QCOMPARE(popup->currentIndex(),highlighted);
+        }
+        window.category->hidePopup();
+        window.engine->tick();QCoreApplication::processEvents();QVERIFY(!popup->isVisible());
+        QCOMPARE(resets.count(),0);QCOMPARE(inserted.count(),0);QCOMPARE(removed.count(),0);QVERIFY(choice.isValid());
+        QCOMPARE(list->currentIndex(),QModelIndex(choice));QCOMPARE(list->currentItem()->data(Qt::UserRole),id);
+        QCOMPARE(window.dosage->value(),2);
+        window.search->setText("奥司他韦");QCOMPARE(list->count(),1);
+        QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),QString("M10"));
+        const QPersistentModelIndex filtered(list->currentIndex());
+        window.search->clear();QVERIFY(filtered.isValid());QCOMPARE(list->currentIndex(),QModelIndex(filtered));
+        window.search->setText("奥司他韦");
+        QVERIFY(fixture.open(QIODevice::WriteOnly));fixture.write(healthy);fixture.close();
+        QVERIFY(window.engine->loadGame(path));QCOMPARE(list->count(),0);
+        QVERIFY(!window.treatButton->isEnabled());
+    }
     void startupCancelDoesNotOverwriteExistingLife(){
         QTemporaryDir dir;QVERIFY(dir.isValid());
         const auto path=SaveRepository::Store(dir.path()).pathFor("autosave");

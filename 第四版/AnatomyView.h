@@ -16,7 +16,7 @@ public:
     QString selectedOrgan() const { return selected; }
     void setStates(const QMap<QString,OrganState>& states);
     void setCutaway(bool enabled);
-    void setSkinVisible(bool enabled);
+    void setDissectionWindow(bool enabled);
     void setAutoRotate(bool enabled);
     void resetCamera();
     void playTreatment(const QString& organ,const QString& medicineId,bool success);
@@ -43,9 +43,11 @@ private:
     struct Range { int first,count,layer; QString organ; QVector4D color; float roughness; QString structure; QVector3D low,high; };
     struct Mesh { GLuint vao=0,vbo=0; QVector<Range> ranges; QVector3D center; float radius=1; int triangles=0; };
     void upload(Mesh&,const AnatomyModel&);
+    bool loadPortrait();
     void destroy(Mesh&);
     void cleanup();
-    void renderMesh(const Mesh&,bool lesionPass=false);
+    enum class RenderPass { Surface, Aperture, Lesion };
+    void renderMesh(const Mesh&,RenderPass pass=RenderPass::Surface);
     void drawOverlay();
     QPointF project(QVector3D) const;
     void refreshLesions();
@@ -53,6 +55,7 @@ private:
     bool visibleStructure(const Range&) const;
     QMap<QString,Mesh> meshes;
     Mesh lesionMesh;
+    Mesh portrait;
     QMap<QString,OrganState> states;
     QMap<QString,DiseaseVisual> visuals;
     QMap<QString,QVector3D> treatmentSites;
@@ -60,7 +63,7 @@ private:
     QString selected,glError;
     float yaw=-12,pitch=0,zoom=1;
     float age=20;
-    bool ready=false,cutaway=false,skinVisible=true,autoRotate=false,lesionsDirty=true,animate=true;
+    bool ready=false,cutaway=false,dissection=false,autoRotate=false,lesionsDirty=true,animate=true;
     QPointF pressPoint,lastPoint;
     bool dragged=false;
     QMatrix4x4 model,view,projection;

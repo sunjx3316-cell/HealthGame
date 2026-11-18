@@ -6,6 +6,7 @@
 // A semantic visual phenotype, never a diagnosis. Hidden state must not enter it.
 struct DiseaseVisual {
     QString id, title, description, target;
+    int catalogNumber = 0;
     int pattern = 0; // 0 normal, 1 inflammation, 2 tumor, 3 fibrosis, 4 fatty,
                      // 5 ischemia, 6 rash, 7 ulcer, 8 obstruction, 9 electrical,
                      // 10 edema, 11 jaundice, 12 infection, 13 structural.

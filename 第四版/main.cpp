@@ -12,7 +12,9 @@ int main(int argc,char* argv[]){
     QApplication app(argc,argv);
     app.setApplicationName("HealthGame");app.setOrganizationName("HealthGame");
     const auto args=app.arguments();const int check=args.indexOf("--render-check");
-    MainWindow window(nullptr,check<0);window.show();
+    MainWindow window(nullptr,check<0);
+    if(check>=0)window.setAttribute(Qt::WA_DontShowOnScreen);
+    window.show();
     QTimer checkTimer;QElapsedTimer timeout;
     if(check>=0){
         if(check+1>=args.size())return 2;

@@ -1,0 +1,93 @@
+{
+  "stride": 24,
+  "parts": [
+    {
+      "name": "palm and digits",
+      "layer": 2,
+      "color": [
+        0.85,
+        0.655,
+        0.55
+      ],
+      "first": 0,
+      "count": 79182
+    },
+    {
+      "name": "forearm",
+      "layer": 2,
+      "color": [
+        0.85,
+        0.655,
+        0.55
+      ],
+      "first": 79182,
+      "count": 17088
+    },
+    {
+      "name": "sole",
+      "layer": 2,
+      "color": [
+        0.85,
+        0.655,
+        0.55
+      ],
+      "first": 96270,
+      "count": 53898
+    },
+    {
+      "name": "Patient surface",
+      "layer": 2,
+      "color": [
+        0.85,
+        0.655,
+        0.55
+      ],
+      "first": 150168,
+      "count": 170904
+    },
+    {
+      "name": "Crown",
+      "layer": 9,
+      "color": [
+        0.19,
+        0.125,
+        0.105
+      ],
+      "first": 321072,
+      "count": 90618
+    },
+    {
+      "name": "Swept locks",
+      "layer": 10,
+      "color": [
+        0.226,
+        0.156,
+        0.129
+      ],
+      "first": 411690,
+      "count": 19584
+    },
+    {
+      "name": "helper-l-eye",
+      "layer": 8,
+      "color": [
+        0.9,
+        0.85,
+        0.79
+      ],
+      "first": 431274,
+      "count": 1680
+    },
+    {
+      "name": "helper-r-eye",
+      "layer": 8,
+      "color": [
+        0.9,
+        0.85,
+        0.79
+      ],
+      "first": 432954,
+      "count": 1680
+    }
+  ]
+}

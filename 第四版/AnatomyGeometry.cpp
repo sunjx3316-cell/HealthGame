@@ -1,4 +1,5 @@
 #include "AnatomyGeometry.h"
+#include "LifeShape.h"
 #include <QCoreApplication>
 #include <QFile>
 #include <QDir>
@@ -97,6 +98,13 @@ bool AnatomyGeometry::affected(const QString& structure,const DiseaseVisual& vis
         if(structure.contains(target,Qt::CaseInsensitive))return true;
     return false;
 }
+bool AnatomyGeometry::prefersSection(const QString& name,const DiseaseVisual& v){
+    if(!v.pattern || name.isEmpty())return false;
+    if(v.id=="D37")return true;
+    for(const auto& part:atlas().models[name].parts)
+        if(part.layer==1&&affected(part.structure,v))return true;
+    return false;
+}
 DiseaseVisual AnatomyGeometry::locatedVisual(const QString& name,const DiseaseVisual& visual){
     if(!visual.pattern)return visual;
     auto result=visual;const auto& parts=atlas().models[name].parts;
@@ -112,11 +120,14 @@ DiseaseVisual AnatomyGeometry::locatedVisual(const QString& name,const DiseaseVi
     desired.setX(desired.x()+(hi.x()-lo.x())*.24f*std::clamp(visual.focus.x(),-1.f,1.f));
     desired.setY(desired.y()+(hi.y()-lo.y())*.25f*std::clamp(visual.focus.y(),-1.f,1.f));
     desired.setZ(hi.z());
+    const bool innerWall=visual.target=="Mucosa of stomach";
+    if(innerWall)desired.setZ(std::min(-.04f,hi.z()));
     // Select an actual anterior surface point. All overlays and deformation use
     // source-space registration, including secondary organs such as the appendix.
     float best=std::numeric_limits<float>::max();
     for(const auto& p:parts)if(affected(p.structure,visual)){
         for(const auto& vertex:p.vertices){
+            if(innerWall&&lo.z()<.0f&&vertex.position.z()>.0f)continue;
             V d=vertex.position-desired;
             float score=d.x()*d.x()+d.y()*d.y()+.09f*d.z()*d.z();
             if(score<best){best=score;result.focus=vertex.position;}
@@ -124,27 +135,85 @@ DiseaseVisual AnatomyGeometry::locatedVisual(const QString& name,const DiseaseVi
     }
     return result;
 }
-AnatomyModel AnatomyGeometry::lesions(const QString&,const DiseaseVisual&){
-    // Disease relief is now deformed on the real anatomical surface in the
-    // vertex shader; there are no floating ellipsoid "tumors".
-    return {};
+AnatomyModel AnatomyGeometry::lesions(const QString& name,const DiseaseVisual& v){
+    AnatomyModel result;
+    if(!v.pattern || v.amount<=0)return result;
+    // Tissue-attached nodules, vesicles, bullae, plaques and intraluminal
+    // stones. Diffuse and functional diseases use their own surface/beat pass.
+    struct Form { float radius,height,spread,lobes; int count; };
+    static const QMap<QString,Form> shapes{
+        {"D05",{.036f,.024f,.31f,.08f,9}}, {"D07",{.074f,.013f,.25f,.22f,7}},
+        {"D13",{.058f,.049f,.21f,.08f,10}},{"D19",{.10f,.028f,.44f,.19f,9}},
+        {"D26",{.056f,.043f,.37f,.18f,7}}, {"D33",{.069f,.041f,.65f,.16f,24}},
+        {"D34",{.20f,.15f,.28f,.21f,6}},   {"D35",{.20f,.18f,.32f,.25f,7}},
+        {"D37",{.052f,.052f,.12f,.18f,5}}, {"D41",{.14f,.11f,.52f,.06f,7}},
+        {"D43",{.047f,.036f,.17f,.18f,6}}, {"D44",{.21f,.155f,.35f,.21f,7}},
+        {"D52",{.073f,.046f,.68f,.22f,26}}
+    };
+    const auto spec=shapes.constFind(v.id);if(spec==shapes.cend())return result;
+    const float strength=v.amount, scale=.44f+.56f*strength;
+    const int count=std::max(1,int(std::ceil(spec->count*strength)));
+    const auto& parts=atlas().models[name].parts;
+    struct Site { const AnatomyVertex* vertex=nullptr; float distance=1e9f; QString structure; };
+    QVector<QVector3D> placed;
+    for(int i=0;i<count;++i){
+        float angle=i*2.399963f+.7f,spread=spec->spread*scale*std::sqrt(float(i)/std::max(1,count-1));
+        V goal=v.focus+V(std::cos(angle)*spread,std::sin(angle)*spread,0);
+        Site best;
+        for(const auto& p:parts)if(affected(p.structure,v)){
+            // Triangle lists repeat source vertices. A bounded deterministic
+            // sample is sufficient for satellite sites; the primary uses the registered anchor.
+            int stride=std::max(1,int(p.vertices.size()/6500));
+            for(int j=0;j<p.vertices.size();j+=i?stride:1){
+                const auto& pt=p.vertices[j];float d=(pt.position-goal).lengthSquared();
+                if(d<best.distance){best={&pt,d,p.structure};if(d<1e-12f)break;}
+            }
+        }
+        if(!best.vertex)continue;
+        const auto origin=best.vertex->position;
+        float radius=spec->radius*scale*(i==0?1.f:(v.pattern==2?.39f:.82f)+.13f*std::sin(angle));
+        if(std::any_of(placed.begin(),placed.end(),[&](V point){return (point-origin).length()<radius*.82f;}))continue;
+        placed<<origin;
+        V normal=best.vertex->normal.normalized();
+        if(normal.lengthSquared()<.5f)continue;
+        V axis=V::crossProduct(normal,std::abs(normal.y())<.90f?V(0,1,0):V(1,0,0)).normalized();
+        V side=V::crossProduct(normal,axis);
+        bool stone=v.id=="D37";
+        float height=radius*spec->height/spec->radius;
+        QColor tint=v.color;
+        if(v.id=="D13"||v.id=="D05"||v.id=="D41")tint=QColor("#dfaba1");
+        if(v.id=="D43")tint=QColor("#dfcba6");
+        AnatomyPart part;part.organ=name;part.structure=best.structure;part.layer=4;
+        part.roughness=stone?.76f:v.pattern==6?.26f:.48f;
+        part.color={float(tint.redF()),float(tint.greenF()),float(tint.blueF()),1};
+        auto surface=[&](float u,float t){
+            float s=std::sin(t),c=std::cos(t);
+            float bulge=1+spec->lobes*(.58f*std::cos(3*u+angle)+.42f*std::sin(5*u-t))*s*s;
+            return origin+axis*(radius*bulge*s*std::cos(u))+side*(radius*.83f*bulge*s*std::sin(u))
+                +normal*(height*(c*(1+.18f*(bulge-1))-(stone?1.06f:.20f)));
+        };
+        constexpr int rings=12,sectors=24;
+        auto vertex=[&](int j,int k){
+            const float u=6.2831853f*(k%sectors)/sectors,t=3.14159265f*j/rings;
+            V n=j==0?normal:j==rings?-normal:V::crossProduct(
+                    (surface(u,t+.02f)-surface(u,t-.02f)).normalized(),
+                    (surface(u+.02f,t)-surface(u-.02f,t)).normalized()).normalized();
+            return AnatomyVertex{surface(u,t),n,.92f};
+        };
+        QVector<AnatomyVertex> grid;grid.reserve((rings+1)*sectors);
+        for(int j=0;j<=rings;++j)for(int k=0;k<sectors;++k)grid<<vertex(j,k);
+        for(int j=0;j<rings;++j)for(int k=0;k<sectors;++k){
+            int a=j*sectors+k,b=j*sectors+(k+1)%sectors;
+            if(j!=0)part.vertices<<grid[a]<<grid[a+sectors]<<grid[b];
+            if(j!=rings-1)part.vertices<<grid[b]<<grid[a+sectors]<<grid[b+sectors];
+        }
+        result.parts<<std::move(part);
+    }
+    return result;
 }
 QVector3D AnatomyGeometry::ageParameters(float age){
-    age=std::clamp(age,0.f,110.f);
-    struct Key{float age,leg,trunk,head;};
-    static const Key keys[]={{0,.25f,.38f,.64f},{5,.53f,.64f,.83f},{12,.83f,.85f,.96f},{20,1,1,1},{55,1,1,1},{80,.99f,.95f,1},{110,.98f,.90f,1}};
-    for(int i=0;i<6;++i)if(age<=keys[i+1].age){
-        const auto a=keys[i],b=keys[i+1];float t=(age-a.age)/(b.age-a.age);t=t*t*(3-2*t);
-        return {a.leg+(b.leg-a.leg)*t,a.trunk+(b.trunk-a.trunk)*t,a.head+(b.head-a.head)*t};
-    }return {1,1,1};
+    return LifeShape::at(age).length.toVector3D();
 }
 QVector3D AnatomyGeometry::agePosition(QVector3D p,float age){
-    V a=ageParameters(age);
-    float headWeight=std::clamp((p.y()-1.18f)/.20f,0.f,1.f);
-    float width=(.30f+.70f*a.y())*(1-headWeight)+a.z()*headWeight;
-    float y=-1.7f+std::min(p.y()+1.7f,1.7f)*a.x()
-        +std::clamp(p.y(),0.f,1.24f)*a.y()+std::max(p.y()-1.24f,0.f)*a.z();
-    float old=std::clamp((age-55)/55.f,0.f,1.f);
-    float upper=std::clamp((p.y()-.25f)/1.1f,0.f,1.f);
-    return {p.x()*width,y,p.z()*width+old*.20f*upper*upper};
+    return LifeShape::at(age).map(p);
 }

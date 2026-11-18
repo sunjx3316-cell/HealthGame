@@ -43,6 +43,7 @@ public:
     double getHealth() const { return health; }
     double getImmunity() const { return immunity; }
     int getAge() const { return age; }
+    float visualAge() const { return float(age+(currentTick+tickAccumulator)/ticksPerYear); }
     QMap<QString, OrganState> getOrgans() const { return organs; }
     double getSystolic() const { return bpSys; }
     double getDiastolic() const { return bpDia; }

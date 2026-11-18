@@ -9,12 +9,13 @@
 #include <QCheckBox>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QPropertyAnimation>
 AnatomyLab::AnatomyLab(int age,QWidget* parent):QDialog(parent){
     setWindowTitle("解剖图谱 · 年龄与病灶演示");resize(1260,860);setMinimumSize(950,660);
     auto* root=new QVBoxLayout(this);
     auto* heading=new QLabel("解剖图谱  /  ANATOMY ATLAS");heading->setStyleSheet("font-size:20px;font-weight:600;color:#e5ede4;padding:10px;");
     root->addWidget(heading);
-    auto* note=new QLabel("独立演示，不修改游戏进度。源模型：成人 Z-Anatomy / BodyParts3D；年龄形变、疾病位置与外观是教学风格的游戏示意，并非诊断依据。");
+    auto* note=new QLabel("拖动年龄观察生长，点选疾病观察部位。人物来自 MakeHuman 年龄网格，器官来自 Z-Anatomy / BodyParts3D。年龄和病灶为游戏示意。");
     note->setWordWrap(true);note->setStyleSheet("color:#8dafaa;padding:4px 10px;");root->addWidget(note);
     auto* controls=new QHBoxLayout;
     organ=new QComboBox;organ->setObjectName("atlasOrgan");organ->addItems({"心脏","肺部","肝脏","胃部","皮肤"});
@@ -27,17 +28,26 @@ AnatomyLab::AnatomyLab(int age,QWidget* parent):QDialog(parent){
     root->addLayout(controls);
     view=new AnatomyView;root->addWidget(view,1);
     auto* ages=new QHBoxLayout;ages->addWidget(new QLabel("年龄形态"));
-    ageSlider=new QSlider(Qt::Horizontal);ageSlider->setObjectName("atlasAge");ageSlider->setRange(0,110);ageSlider->setValue(age);
-    ageSlider->setTickPosition(QSlider::TicksBelow);ageSlider->setTickInterval(10);
+    ageSlider=new QSlider(Qt::Horizontal);ageSlider->setObjectName("atlasAge");ageSlider->setRange(0,1100);ageSlider->setValue(age*10);
+    ageSlider->setTickPosition(QSlider::TicksBelow);ageSlider->setTickInterval(100);
+    auto* transition=new QPropertyAnimation(ageSlider,"value",this);
+    transition->setEasingCurve(QEasingCurve::InOutCubic);
+    connect(ageSlider,&QSlider::sliderPressed,transition,&QPropertyAnimation::stop);
     ageLabel=new QLabel;ageLabel->setMinimumWidth(130);
     ages->addWidget(ageSlider,1);ages->addWidget(ageLabel);
     for(int a:{0,5,12,20,60,90}){
         auto* preset=new QPushButton(QString::number(a)+" 岁");preset->setFixedWidth(65);
-        connect(preset,&QPushButton::clicked,this,[this,a]{ageSlider->setValue(a);});ages->addWidget(preset);
+        connect(preset,&QPushButton::clicked,this,[this,a,transition]{
+            transition->stop();transition->setStartValue(ageSlider->value());transition->setEndValue(a*10);
+            transition->setDuration(600+qAbs(ageSlider->value()-a*10));transition->start();
+        });ages->addWidget(preset);
     }root->addLayout(ages);
     description=new QLabel;description->setWordWrap(true);description->setMinimumHeight(58);
     description->setStyleSheet("color:#b5cbc4;padding:8px;");root->addWidget(description);
     auto* bottom=new QHBoxLayout;
+    auto* window=new QCheckBox("胸腹透视");bottom->addWidget(window);
+    connect(window,&QCheckBox::toggled,view,&AnatomyView::setDissectionWindow);
+    connect(overview,&QCheckBox::toggled,window,&QCheckBox::setEnabled);
     auto* rotate=new QCheckBox("自动旋转");connect(rotate,&QCheckBox::toggled,view,&AnatomyView::setAutoRotate);
     auto* reset=new QPushButton("复位视角");connect(reset,&QPushButton::clicked,view,&AnatomyView::resetCamera);
     auto* effect=new QPushButton("治疗效果演示");
@@ -56,10 +66,7 @@ AnatomyLab::AnatomyLab(int age,QWidget* parent):QDialog(parent){
     connect(organ,&QComboBox::currentIndexChanged,this,[this,fill]{fill();refresh();});
     connect(disease,&QComboBox::currentIndexChanged,this,[this]{
         const auto visual=DiseaseVisuals::forDisease(disease->currentData().toString());
-        bool internal=false;
-        for(const auto& part:AnatomyGeometry::organ(organ->currentText()).parts)
-            if(part.layer==1&&AnatomyGeometry::affected(part.structure,visual))internal=true;
-        cut->setChecked(internal);refresh();
+        cut->setChecked(AnatomyGeometry::prefersSection(organ->currentText(),visual));refresh();
     });
     connect(stage,&QComboBox::currentIndexChanged,this,&AnatomyLab::refresh);
     connect(ageSlider,&QSlider::valueChanged,this,&AnatomyLab::refresh);
@@ -68,7 +75,7 @@ AnatomyLab::AnatomyLab(int age,QWidget* parent):QDialog(parent){
     refresh();
 }
 void AnatomyLab::refresh(){
-    const int age=ageSlider->value();view->setAge(age);
+    const float age=ageSlider->value()/10.f;view->setAge(age);
     ageLabel->setText(QString("%1 岁 · %2").arg(age).arg(age<3?"婴幼儿":age<12?"儿童":age<20?"青少年":age<60?"成人":"老年"));
     QMap<QString,OrganState> states;for(const QString& s:QStringList{"心脏","肺部","肝脏","胃部","皮肤"})states[s]=OrganState(s);
     const auto d=Database::getInstance().getDiseaseById(disease->currentData().toString());

@@ -37,3 +37,6 @@ https://gcc.gnu.org/onlinedocs/libgomp/Runtime-Library-Exception.html
 The portable Blender used to prepare assets is a separate build tool; it is not
 bundled in the game, nor is any upstream Blender add-on script copied into it.
 
+The v0.7 exterior character uses MakeHuman HM08 core assets released under CC0.
+See [portrait provenance and reproduction instructions](第四版/assets/anatomy/PORTRAIT-NOTICE.md).
+

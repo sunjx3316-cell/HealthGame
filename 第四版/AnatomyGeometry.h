@@ -29,6 +29,7 @@ public:
     static QVector3D bodyAnchor(const QString& organ);
     static DiseaseVisual locatedVisual(const QString& organ, const DiseaseVisual& visual);
     static bool affected(const QString& structure, const DiseaseVisual& visual);
+    static bool prefersSection(const QString& organ,const DiseaseVisual& visual);
     static QString error();
     static QVector3D agePosition(QVector3D position, float age);
     static QVector3D ageParameters(float age);

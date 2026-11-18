@@ -1,7 +1,7 @@
 param(
     [string]$QtRoot = 'C:\Qt\6.11.0\mingw_64',
     [string]$BuildDirectory = 'build-3d',
-    [string]$PackageName = 'HealthGame-Balanced-v0.6'
+    [string]$PackageName = 'HealthGame-Growth-v0.7.1'
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
